@@ -1,0 +1,24 @@
+
+# Use LLVM as the base style
+BasedOnStyle: LLVM
+
+# Indentation width (usually 2 or 4)
+IndentWidth: 2
+
+# Use spaces instead of tabs
+UseTab: Never
+
+# The column limit before wrapping code
+ColumnLimit: 80
+
+# Keep braces on the same line (K&R style)
+BreakBeforeBraces: Attach
+
+# Allow putting "short" if statements on a single line
+AllowShortIfStatementsOnASingleLine: false
+
+# Sort #include directives alphabetically
+SortIncludes: true
+
+# Add a space after 'if', 'for', and 'while'
+SpaceBeforeParens: ControlStatements
