@@ -1,10 +1,10 @@
 #ifndef SHARED_H
 #define SHARED_H
 
-#define _POSIX_C_SOURCE 200112L // TODO: Explain why this is needed to use structs related to getaddrinfo
+#define _POSIX_C_SOURCE 200112L
 #define LISTENQ 100
-
 #include <stdio.h>
+#include <unistd.h>
 #include <errno.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -14,19 +14,15 @@
 #include <fcntl.h>
 #include <stdlib.h>
 
-// Header size in bytes and maximum payload size for a 
-// single message in bytes.
-const size_t MSG_HEADER_SIZE = 7;
-const size_t MSG_MAX_PAYLOAD_SIZE = 4096; 
-const size_t MAX_USERNAME_SIZE = 32;
-const size_t MAX_PASSWORD_SIZE = 32;
-
-const size_t MAX_MSG_CONTENT_SIZE = 250; // MAX message size in bytes/characters
+#define MSG_HEADER_SIZE 7 // max header size in bytes
+#define MSG_MAX_PAYLOAD_SIZE 4096 // max payload size in bytes
+#define MAX_USERNAME_SIZE 32
+#define MAX_PASSWORD_SIZE 32
+#define MAX_MSG_CONTENT_SIZE 250 // MAX message size a user can type/send out
 
 // -----------------------------------
 // Database (File) States
 // -----------------------------------
-uint64_t num_users = 0;
 
 /**
  * Struct representing a registered user in the application
@@ -40,9 +36,6 @@ typedef struct _user {
   char username[MAX_USERNAME_SIZE + 1];
   char password[MAX_PASSWORD_SIZE + 1];
 } user_t;
-
-const char* user_file_path = "./src/user_file_db.csv";
-pthread_mutex_t user_file_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // -----------------------------------
 // Connection Table States
@@ -69,16 +62,6 @@ typedef struct _conn {
   user_t* user;
 } conn_t;
 
-/*
-A dynamically allocated array of `conn_t` structs representing all the clients that are connected 
-to the TCP chat server. It's indexed by connfd, so as long as you have the connection descriptor, you
-should be able to access it. 
-*/
-conn_t *conn_table = NULL;
-uint32_t conn_table_capacity = 10;
-uint32_t num_conns = 0;
-pthread_mutex_t conn_table_mutex = PTHREAD_MUTEX_INITIALIZER;
-
 /**
  * Struct representing a single message being transferred between client and server
  * 
@@ -93,9 +76,7 @@ typedef struct _message {
   uint8_t type;
   uint8_t flags;
   uint32_t payload_length;
-
-  // TODO: Flexible array member; this will be dynamic
-  char payload[MSG_MAX_PAYLOAD_SIZE];
+  uint8_t payload[MSG_MAX_PAYLOAD_SIZE];
 } message_t;
 
 // Message Types (Global Header)
@@ -112,23 +93,15 @@ typedef enum {
 typedef enum {
   RESP_OK = 0,
   RESP_ERROR_MALFORMED = 1,
-  RESP_ERROR_USER_EXISTS = 2,
+  RESP_ERROR_USER_EXISTS = 2, // For "username already taken"
   RESP_ERROR_USER_NOT_FOUND = 3,
   RESP_ERROR_INVALID_CREDENTIALS = 4,
   RESP_ERROR_INTERNAL = 5,
   RESP_ERROR_UNKNOWN_COMMAND = 6
 } response_code_t;
 
-// Simple response 
-static const char* response_messages[] = {
-  [RESP_OK] = "Success",
-  [RESP_ERROR_MALFORMED] = "Malformed request",
-  [RESP_ERROR_USER_EXISTS] = "Username already taken",
-  [RESP_ERROR_USER_NOT_FOUND] = "User not found",
-  [RESP_ERROR_INVALID_CREDENTIALS] = "Invalid credentials",
-  [RESP_ERROR_INTERNAL] = "Internal server error",
-  [RESP_ERROR_UNKNOWN_COMMAND] = "Unknown command"
-};
+// Response messages corresponding with response codes 
+extern const char* response_messages[];
 
 // TLV Tags (Payload Context)
 // NOTE: This should never exceed the range of uint8_t 
@@ -137,20 +110,32 @@ typedef enum {
   TAG_PASSWORD = 1,
   TAG_RESPONSE_CODE = 2,
   TAG_RESPONSE_MESSAGE = 3,
-  
   TAG_WORLD = 4,
   TAG_USER_ID = 5,
   TAG_ROOM_ID = 6,
-  TAG_IS_ONLINE = 7,
-  
-
-  
-
+  TAG_IS_AUTH = 7,
   TAG_MESSAGE_CONTENT = 8,
   // TAG_SERVER_ERROR = 8
 } tlv_tag_t;
 
 
+/**
+ * Opens a listening socket at the given port
+ * 
+ * @param port Port number that we're launching the server at.
+ * @return The fd of the listening socket we've opened. Otherwise -1 on error.
+ */
+int open_listenfd(char *port);
+
+/**
+ * Thread routine that has an infinite server loop.
+ * 
+ * @param vargp A pointer to the connfd for the thread
+ * 
+ * NOTE: This is the thread routine that each thread uses to serve a client.
+ * We want to maintain the connection until the user disconnects, so 
+ * we're probably going to run a while loop
+ */
 void *serve_connection(void *vargp);
 
 #endif

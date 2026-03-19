@@ -1,5 +1,91 @@
 #include "shared.h"
 
+
+const char* response_messages[] = {
+  [RESP_OK] = "Success",
+  [RESP_ERROR_MALFORMED] = "Malformed request",
+  [RESP_ERROR_USER_EXISTS] = "Username already taken",
+  [RESP_ERROR_USER_NOT_FOUND] = "User not found",
+  [RESP_ERROR_INVALID_CREDENTIALS] = "Invalid credentials",
+  [RESP_ERROR_INTERNAL] = "Internal server error",
+  [RESP_ERROR_UNKNOWN_COMMAND] = "Unknown command"
+};
+
+
+// Dynamically allocated array representing all connected clients on the TCP server.
+// This is indexed by connfd to make things a little easier.
+static uint64_t num_users = 0;
+static conn_t *conn_table = NULL;
+static uint32_t conn_table_capacity = 10;
+static uint32_t num_conns = 0;
+static pthread_mutex_t conn_table_mutex = PTHREAD_MUTEX_INITIALIZER;
+static const char* user_file_path = "./src/user_file_db.csv";
+static pthread_mutex_t user_file_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+
+/**
+ * Writes a TLV into a buffer.
+ * 
+ * @param buf A double pointer to a buffer. The motivation is that with a single pointer *buf
+ *            modifications like buf += 1, doesn't update the pointer in the caller. However by 
+ *            using a double pointer, we'll be able to update the buffer pointer in the caller.
+ * @param tag The tag that we're giving the TLV; "what is it?".
+ * @param len The size of the data (in bytes from 0-255) of the value, "how many bytes is it?".
+ * @param value A pointer to the value that we want to write into the buffer
+ * @param convert_to_network 1 to convert the value into network-byte-order, otherwise 0 for no conversion.
+ *
+ * NOTE: 
+ * - Intends to mainly be a helper function to create_response.
+ * - If len > 1, we know that the value ("payload") is a multi-byte type.
+ * - Limitations: Since len is a uint8_t we can only represent payloads of size [0, 255] bytes. If we wanted to represent bigger payloads, 
+ * we'd simply upgrade to uint16_t, allowing us to write values of size [0, 65335] bytes, which will later be useful for messages. Of course, 
+ * if we decide to use uint16_t, we'd need to ensure the 16-bit integer is represented in network-byte-order and probably use memcpy to copy 
+ * from bytes from the integer into the buffer.
+ */
+void write_tlv(uint8_t **buf, tlv_tag_t tag, uint8_t len, const void *value, int convert_to_network) {
+  
+  // 1. Write tag and length (1 byte each, no flipping)
+  *(*buf)++ = tag; // equivalent to **buf = tag, then (*buf)++
+  *(*buf)++ = len;
+
+  // 2. Write the convered (if necessary) byte seqeunce into the buffer
+  if (convert_to_network) {
+    // If we want to convert a multi-byte number into network-byte-order. Three cases:
+    // a. Converting a 2-byte sequence
+    // b. Converting a 4-byte sequence
+    // c. Converting a 1-byte sequence (no conversion needed even if the caller wants it)
+    if (len == 2) {
+      uint16_t val;
+      memcpy(&val, value, 2);
+      val = htons(val);
+      memcpy(*buf, &val, 2);
+    } else if (len == 4) {
+      uint32_t val;
+      memcpy(&val, value, 4);
+      val = htonl(val);
+      memcpy(*buf, &val, 4);
+    } else {
+      memcpy(*buf, value, len);
+    }
+  } else {
+    // Else, the caller intends to write a string into the buffer
+    memcpy(*buf, value, len);
+  }
+
+  // 3. Advance buffer pointer by the byte size of the value.
+  *buf += len;
+}
+
+// -----------------------------------
+// Startup and Shutdown
+// -----------------------------------
+
+// TODO: Handle clean shutdown
+int handle_shutdown(int SIGINT) {
+  return 0;
+}
+
+
 // -----------------------------------
 // Database (file) API
 // -----------------------------------
@@ -12,7 +98,7 @@
  */
 void init_user_file_state() {
   // 1. Create file if it doesn't exist.
-  FILE* fp = fopen(user_file_path, "r");
+  FILE* fp = fopen(user_file_path, (const char *)'r');
   if (fp == NULL) {
     num_users = 0;
     return;
@@ -33,7 +119,7 @@ void init_user_file_state() {
   }
   num_users = last_id;
   fclose(fp);
-  printf("Server init: %u users loaded.\n", num_users);
+  printf("Server init: %lu users loaded.\n", num_users);
 }
 
 /**
@@ -45,7 +131,7 @@ void init_user_file_state() {
  */
 int insert_user(user_t* user) {
   pthread_mutex_lock(&user_file_mutex);
-  FILE* fp = fopen(user_file_path, "a");
+  FILE* fp = fopen(user_file_path, (const char *)'a');
   if (fp == NULL) {
     pthread_mutex_unlock(&user_file_mutex);
     fprintf(stderr, "insert_user error: %s\n", strerror(errno));
@@ -77,7 +163,7 @@ int insert_user(user_t* user) {
  */
 int get_user_by_username(char* username, user_t *user) {
   pthread_mutex_lock(&user_file_mutex);
-  FILE* fp = open(user_file_path, "r");
+  FILE* fp = fopen(user_file_path, (const char*)'r');
   if (fp == NULL) {
     pthread_mutex_unlock(&user_file_mutex);
     return -1; 
@@ -106,6 +192,42 @@ int get_user_by_username(char* username, user_t *user) {
   return found;
 }
 
+/**
+ * Populates a user_t pointer with user data from the database.
+ * 
+ * @param user_id The ID of the user in the database.
+ * @param user Struct pointer that we'll populate with the user information as long as user is found.
+ * @return 1 if user is found, otherwise 0.
+ */
+int get_user_by_userID(uint32_t user_id, user_t *user) {
+    pthread_mutex_lock(&user_file_mutex);
+    FILE* fp = fopen(user_file_path, (const char*)'r');
+    if (fp == NULL) {
+      pthread_mutex_unlock(&user_file_mutex);
+      return -1; 
+    } 
+
+    char line[512]; 
+    int found = 0;
+    while (fgets(line, sizeof(line), fp)) {
+      uint32_t id;
+      char current_username[MAX_USERNAME_SIZE+1];
+      char current_password[MAX_PASSWORD_SIZE+1];
+      if (sscanf(line, "%u,%s,%s", &id, current_username, current_password) == 3) {
+        if (id == user_id) {
+          found = 1;
+          user->id = id;
+          strcpy(user->username, (const char *)current_username);
+          strcpy(user->password, (const char *)current_password);
+          break;
+        }
+      }
+    }
+
+    pthread_mutex_unlock(&user_file_mutex);
+    return found;
+}
+
 // -----------------------------------
 // Connection Table API
 // -----------------------------------
@@ -118,13 +240,13 @@ int get_user_by_username(char* username, user_t *user) {
 void init_conn_table() {
   conn_table = (conn_t *)malloc(sizeof(conn_t) * conn_table_capacity);
   if (conn_table == NULL) {
-    fprintf(stderr, "Malloc failed on connection table: %s\n", sterror(errno));
+    fprintf(stderr, "Malloc failed on connection table: %s\n", strerror(errno));
     exit(1);
   }
   for (uint32_t i = 0; i < conn_table_capacity; i++) {
     conn_table[i].connfd = -1;
     conn_table[i].user = NULL;
-    conn_table[i].ip_address = (struct sockaddr_storage){};
+    conn_table[i].ip_address = (struct sockaddr_storage){0};
   }
 }
 
@@ -283,15 +405,22 @@ int register_user(int connfd, message_t *msg, uint8_t* extra_data, uint32_t *ext
     return result;
   }
 
-  user_t existing_user = {};
-  result = get_user_by_username(username, &existing_user);
+  user_t user = {0};
+  result = get_user_by_username(username, &user);
   if (result == 0) {
     fprintf(stderr, "Username '%s' already taken!\n", username);
     return RESP_ERROR_USER_EXISTS;
   }
+  
+  // Else, username is unique, so insert a user
+  user_t new_user = {0};
+  new_user.id = 0; 
+  strncpy(new_user.username, username, MAX_USERNAME_SIZE);
+  new_user.username[MAX_USERNAME_SIZE] = '\0'; // Ensure null-termination
+  strncpy(new_user.password, password, MAX_PASSWORD_SIZE);
+  new_user.password[MAX_PASSWORD_SIZE] = '\0';
 
-  user_t new_user = {0, username, password};
-  if (insert_user(&new_user) != 0) {
+  if (insert_user(&user) != 0) {
     return RESP_ERROR_INTERNAL;
   }
   return RESP_OK;
@@ -352,8 +481,8 @@ int list_users(int connfd, message_t *msg, uint8_t *extra_data, uint32_t *extra_
   uint8_t* buf_ptr = (uint8_t *)msg->payload;
   uint8_t* end_ptr = buf_ptr + msg->payload_length;
   int option = -1;     // Either TAG_WORLD, TAG_USER_ID, or TAG_ROOM_ID. If 
-  uint32_t user_id;    // ID of the user that we want information from
-  int online_only = 0; // A filter indicating we only want online users.
+
+  uint32_t user_id;
 
   while (buf_ptr < end_ptr) { 
     if (buf_ptr + 2 > end_ptr) {
@@ -383,10 +512,6 @@ int list_users(int connfd, message_t *msg, uint8_t *extra_data, uint32_t *extra_
         memcpy(&user_id, buf_ptr, num_bytes);
         user_id = ntohl(user_id);
         break;
-      case TAG_IS_ONLINE:
-        // NOTE: The is-online tag should have length of zero, so don't parse a value
-        online_only = 1;
-        break;
       default:
         // Unknown tag - skip it (forward compatibility?)
         fprintf(stderr, "Unknown TLV tag '%d', skipping %d bytes\n", tag, num_bytes);
@@ -395,22 +520,33 @@ int list_users(int connfd, message_t *msg, uint8_t *extra_data, uint32_t *extra_
     buf_ptr += num_bytes;
   }
 
-  /*
-  If option is TAG_WORLD:
-    a. They want all of the users in the app. If they want only online 
-       users, we can simply iterate through the connection table and return 
-       all of the logged in users. 
-    b. Otherwise, iterate through the entire user file on disk and return all users.
-
-  Else if option is TAG_USER_ID:
-    a. If online_only, then iterate through the connection table and find the 
-       connection
-  */
+  
+  // Return all authenticated users to the client
+  // TODO: You'll definitely run out of space for big lists of users
   if (option == TAG_WORLD) {
-    if (online_only) {
-    } else{
+    uint8_t **buf_double_ptr = &extra_data;
+    for (int i = 0; i < num_conns; i++) {
+      if (conn_table[i].is_authenticated == 1) {
+        user_t *user = conn_table[i].user;
+        write_tlv(buf_double_ptr, TAG_USER_ID, sizeof(user->id), &user->id, 1);
+        write_tlv(buf_double_ptr, TAG_USERNAME, strlen(user->username), user->username, 0);
+        write_tlv(buf_double_ptr, TAG_PASSWORD, strlen(user->password), user->password, 0);
+      }
     }
+    return RESP_OK;
   } else if (option == TAG_USER_ID) {
+    user_t found_user = {0};
+    int result = get_user_by_userID(user_id, &found_user);
+    if (result == 0) {
+      return RESP_ERROR_USER_NOT_FOUND;
+    }
+
+    // Write user TLV into the extra_data buffer
+    uint8_t **buf_double_ptr = &extra_data;
+    write_tlv(buf_double_ptr, TAG_USER_ID, sizeof(found_user.id), &found_user.id, 1);
+    write_tlv(buf_double_ptr, TAG_USERNAME, strlen(found_user.username), found_user.username, 0);
+    write_tlv(buf_double_ptr, TAG_PASSWORD, strlen(found_user.password), found_user.password, 0);
+    return RESP_OK;
   } else {
     fprintf(stderr, "list_users failed: No context to list users from e.g., world, group, or a user ID\n");
     return RESP_ERROR_MALFORMED;
@@ -479,24 +615,16 @@ int send_message(int connfd, message_t *msg, uint8_t *extra_data, uint32_t *extr
     buf_ptr += num_bytes;
   }
 
-  /*
-  If TAG_WORLD:
-  - Send the message to all authenticated connections.
 
-  Elif 
-  
-  
-  
-  */
-  if (option == TAG_WORLD) {
-
-
-  } else if (option == TAG_USER_ID) {
-
-  } else {
-    fprintf(stderr, "No message context set!\n");
-    return RESP_ERROR_MALFORMED;
-  }
+  // TODO: Complete this implementation
+  // if (option == TAG_WORLD) {
+  //   // All auth. connections
+  // } else if (option == TAG_USER_ID) {
+  //   // To a specific user
+  // } else {
+  //   fprintf(stderr, "No message context set!\n");
+  //   return RESP_ERROR_MALFORMED;
+  // }
 
   return RESP_OK;
 }
@@ -504,59 +632,6 @@ int send_message(int connfd, message_t *msg, uint8_t *extra_data, uint32_t *extr
 // ------------------------------------------
 // Request-Response, read/write network I/O handling
 // ------------------------------------------
-
-/**
- * Writes a TLV into a buffer.
- * 
- * @param buf A double pointer to a buffer. The motivation is that with a single pointer *buf
- *            modifications like buf += 1, doesn't update the pointer in the caller. However by 
- *            using a double pointer, we'll be able to update the buffer pointer in the caller.
- * @param tag The tag that we're giving the TLV; "what is it?".
- * @param len The size of the data (in bytes from 0-255) of the value, "how many bytes is it?".
- * @param value A pointer to the value.
- * @param convert_to_network 1 to convert the value into network-byte-order, otherwise 0 for no conversion.
- *
- * NOTE: 
- * - Intends to mainly be a helper function to create_response.
- * - If len > 1, we know that the value ("payload") is a multi-byte type.
- * - Limitations: Since len is a uint8_t we can only represent payloads of size [0, 255] bytes. If we wanted to represent bigger payloads, 
- * we'd simply upgrade to uint16_t, allowing us to write values of size [0, 65335] bytes, which will later be useful for messages. Of course, 
- * if we decide to use uint16_t, we'd need to ensure the 16-bit integer is represented in network-byte-order and probably use memcpy to copy 
- * from bytes from the integer into the buffer.
- */
-void write_tlv(uint8_t **buf, tlv_tag_t tag, uint8_t len, const void *value, int convert_to_network) {
-  
-  // 1. Write tag and length (1 byte each, no flipping)
-  *(*buf)++ = tag; // equivalent to **buf = tag, then (*buf)++
-  *(*buf)++ = len;
-
-  // 2. Write the convered (if necessary) byte seqeunce into the buffer
-  if (convert_to_network) {
-    // If we want to convert a multi-byte number into network-byte-order. Three cases:
-    // a. Converting a 2-byte sequence
-    // b. Converting a 4-byte sequence
-    // c. Converting a 1-byte sequence (no conversion needed even if the caller wants it)
-    if (len == 2) {
-      uint16_t val;
-      memcpy(&val, value, 2);
-      val = htons(val);
-      memcpy(*buf, &val, 2);
-    } else if (len == 4) {
-      uint32_t val;
-      memcpy(&val, value, 4);
-      val = htonl(val);
-      memcpy(*buf, &val, 4);
-    } else {
-      memcpy(*buf, value, len);
-    }
-  } else {
-    // Else, the caller intends to write a string into the buffer
-    memcpy(*buf, value, len);
-  }
-
-  // 3. Advance buffer pointer by the byte size of the value.
-  *buf += len;
-}
 
 /**
  * Creates and populates a response message with response code and data.
@@ -578,16 +653,17 @@ int create_response(message_t *msg, response_code_t rc, uint8_t *data_buf, uint3
   // ----- Build message header fields -----
   msg->version = 1;
   msg->type = ACK;
-  msg->flags = 42; // TODO: Random number for now, may need to revise the message format later.
+  msg->flags = 42; // TODO: Placeholder for now
 
   // ----- Build message payload -----
   // 1. Write response code TLV
   // 2. Write response message TLV
-  const char response_message = response_messages[rc];
-  uint8_t msg_len = (uint8_t)strlen(response_message); 
-  uint8_t **buf_double_ptr = &msg->payload;
-  write_tlv(buf_double_ptr, TAG_RESPONSE_CODE, 1, rc, 0);
-  write_tlv(buf_double_ptr, TAG_RESPONSE_MESSAGE, msg_len, response_message, 0);
+  const char* response_message = response_messages[rc];
+  uint8_t msg_len = (uint8_t)strlen(response_message);
+  uint8_t *payload_start = (uint8_t *)msg->payload;
+  uint8_t **payload_double_ptr = &payload_start;
+  write_tlv(payload_double_ptr, TAG_RESPONSE_CODE, 1, &rc, 0);
+  write_tlv(payload_double_ptr, TAG_RESPONSE_MESSAGE, msg_len, response_message, 0);
 
   // 3. Write response data (stream of TLVs) into our message payload
   uint8_t *data_buf_ptr = data_buf;
@@ -598,9 +674,9 @@ int create_response(message_t *msg, response_code_t rc, uint8_t *data_buf, uint3
     // b. Read the length of the TLV value, which is represented by 1 byte.
     // c. Then read the value from the data buffer
     tlv_tag_t tag = *data_buf_ptr;
-    *data_buf_ptr++; 
+    data_buf_ptr++; 
     uint8_t length = *data_buf_ptr;
-    *data_buf_ptr++;
+    data_buf_ptr++;
     uint8_t value[length];
     memcpy(value, data_buf, length);
     data_buf_ptr += length;
@@ -608,17 +684,17 @@ int create_response(message_t *msg, response_code_t rc, uint8_t *data_buf, uint3
     // d. write TLV into the payload, represented by buf_double_ptr
     // TODO: It's probably best to have the caller, or whoever created the data_buf functions handle 
     // the endianness of these TLVs, the values in particular.
-    write_tlv(buf_double_ptr, tag, length, value, 0);
+    write_tlv(payload_double_ptr, tag, length, (const void*)value, 0);
   }
 
   // 4. After storing the payload update the payload_length
   //  a. Read payload length into a temp buffer and convert the byte-sequence into network-byte-order
   //  b. Write temp buffer into payload length
-  uint32_t payload_len = (uint32_t)(*buf_double_ptr - msg->payload);
+  uint32_t payload_len = (uint32_t)(*payload_double_ptr - msg->payload);
   uint32_t net_payload_len = htonl(payload_len);
-  memcpy(msg->payload_length, &net_payload_len, sizeof(uint32_t));
+  memcpy(&msg->payload_length, &net_payload_len, sizeof(uint32_t));
   if (payload_len > MSG_MAX_PAYLOAD_SIZE) {
-    fprintf("create_response error: Creating payload of size '%d', but maximum is '%d'\n", payload_len, MSG_MAX_PAYLOAD_SIZE);
+    fprintf(stderr, "create_response error: Creating payload of size '%d', but maximum is '%d'\n", payload_len, MSG_MAX_PAYLOAD_SIZE);
     return -1;
   }
   return 0;
@@ -692,7 +768,7 @@ int read_one_message(int connfd, message_t* msg) {
  * 
  * @param connfd Descriptor for the connection socket 
  * @param response Response message that we want to write to the remote peer.
- * @return 0 on success, otherwise a response code
+ * @return Number of bytes sent, otherwise -1 on error
  * 
  * NOTE: 
  * It's probably best for this function to assume that 
@@ -717,9 +793,6 @@ int write_one_message(int connfd, message_t* response) {
   // Send it across socket
   size_t total_bytes = buf_ptr - message_buffer;
   int num_bytes_sent = send(connfd, message_buffer, total_bytes, 0);
-  if (num_bytes_sent == -1) {
-    fprintf(stderr, "write_one_message, send() failed: %s\n", strerror(errno));
-  }
   return num_bytes_sent;
 }
 
@@ -737,8 +810,7 @@ int serve_one_message(int connfd) {
   }
 
   // These are passed to service functions to get data (a stream of TLVs) from them and the size of it.
-  // TODO: You won't be able to use all of MSG_MAX_PAYLOAD_SIZE. Expect around 30 bytes to 
-  // we want to use to represent response code and response message TLVs.
+  // NOTE: Can't use all of MSG_MAX_PAYLOAD_SIZE. Expect around 30 bytes for response message and response code tlvs
   uint8_t extra_data[MSG_MAX_PAYLOAD_SIZE] = {0};
   uint32_t extra_data_len = 0;
 
@@ -763,18 +835,99 @@ int serve_one_message(int connfd) {
 
   // d. Write it over TCP
   int write_result = write_one_message(connfd, &response);
+  if (write_result == -1) {
+    fprintf(stderr, "write_one_message failed: %s\n", strerror(errno));
+  }
+
   return 0;  
 }
 
-/**
- * Thread routine that has an infinite server loop.
- * 
- * @param vargp A pointer to the connfd for the thread
- * 
- * NOTE: This is the thread routine that each thread uses to serve a client.
- * We want to maintain the connection until the user disconnects, so 
- * we're probably going to run a while loop
- */
+// ----------------------------------------------
+// Network Connection Stuff
+// ----------------------------------------------
+int open_listenfd(char *port) {
+  struct addrinfo hints, *listp, *p;
+  int listenfd, return_code, optval = 1;
+
+  /*
+  ##### Query Configs for potential server addresses #####
+  - ai_socktype: Here we're looking for connection-oriented communication.
+  - ai_flags: 
+    a. AI_PASSIVE: Configured to let it know we want addresses that can be used by servers (passive/listening sockets).
+      Equivalent to INADDR_ANY as well.
+    b. AI_ADDRCONFIG: Returns IPv4 or IPv6 addresses, depending on what the host is configured to use.
+    c. AI_NUMERICSERV: Indicates that 'service' parameter will be a port number.
+  */
+  memset(&hints, 0, sizeof(struct addrinfo));
+  hints.ai_socktype= SOCK_STREAM;
+  hints.ai_flags = AI_PASSIVE | AI_ADDRCONFIG;
+  hints.ai_flags |= AI_NUMERICSERV;
+  return_code = getaddrinfo(NULL, port, &hints, &listp);
+  if (return_code != 0) {
+    fprintf(stderr, "Getaddrinfo Error: %s\n", gai_strerror(return_code));
+    return -1;
+  }
+
+  /*
+  ##### Open Listening Socket #####
+  1. Iterate through linked list of addrinfo structs to find an address to bind to
+      a. Attempt to create a listening socket for the following protocol (IPv4, IPv6, etc.)
+        socket type (connection-based or datagram based), and transport layer protocol.
+      b. If listenfd < 0, we failed to create a socket for that addrinfo struct. Not a 
+        critical error, so attempt the next addrinfo struct.
+      c. Configure the socket s.t. we can reuse it immediately after closing it. 
+        Good for fast restarts.
+      d. Attempt to bind the socket to an IP:port, if it works, then break out of loop 
+        since we got a success.
+      e. Otherwise, we failed to bind the socket, attempt to close the socket to regain
+        resources. If that also fails, exit out of function.
+  2. Free address info linked list since we're done with it.
+  3. If p is undefined, then we didn't even iterate through the list. This indicates 
+    the OS didn't find any suitable addresses for the configurations applied.
+  4. At this point we have a suitable listening socket. Attempt to open the listening socket
+    which will cause our server to start buffering incoming connections. 
+  */
+  for (p = listp; p; p = p->ai_next) {
+    listenfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+    if (listenfd < 0) {
+      continue; 
+    }
+    setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, (const void*)&optval, sizeof(int));
+    if (bind(listenfd, p->ai_addr, p->ai_addrlen) == 0) {
+      break;
+    }
+    if (close(listenfd) < 0) {
+      fprintf(stderr, "open_listenfd close error: %s\n", strerror(errno));
+      return -1;
+    }
+  }
+
+  freeaddrinfo(listp);
+  if (!p) {
+    fprintf(stderr, "open_listenfd error: No suitable addresses found!\n");
+    return -1;
+  }
+
+  if (listen(listenfd, LISTENQ) < 0) {
+    fprintf(stderr, "open_listenfd listen error: Error opening the listening socket!\n");
+    close(listenfd);
+    return -1;
+  }
+
+
+  // Get the raw IP address (instead of hostname) and give port number as a string
+  char host[1025];
+  char service[32];
+  int s = getnameinfo(p->ai_addr, p->ai_addrlen, host, sizeof(host), service, sizeof(service), NI_NUMERICHOST | NI_NUMERICSERV);
+  if (s == 0) {
+    printf("TCP server running on %s:%s\n", host, service);
+  } else {
+    printf("Couldn't get server IP:port, but server should be running!\n");
+  }
+  
+  return listenfd;
+}
+
 void *serve_connection(void *vargp) {
   int connfd = *((int*)vargp);
   pthread_detach(pthread_self());
