@@ -114,28 +114,65 @@ typedef enum {
   TAG_USER_ID = 5,
   TAG_ROOM_ID = 6,
   TAG_IS_AUTH = 7,
-  TAG_MESSAGE_CONTENT = 8,
+
+  TAG_SENDER_USERNAME = 8,
+  TAG_RECIPIENT_USERNAME = 9,
+  TAG_MESSAGE_CONTENT = 10,
   // TAG_SERVER_ERROR = 8
 } tlv_tag_t;
 
+/**
+ * Writes a TLV into a buffer.
+ * 
+ * @param buf A double pointer to a buffer. The motivation is that with a single pointer *buf
+ *            modifications like buf += 1, doesn't update the pointer in the caller. However by 
+ *            using a double pointer, we'll be able to update the buffer pointer in the caller.
+ * @param tag The tag that we're giving the TLV; "what is it?".
+ * @param len The size of the data (in bytes from 0-255) of the value, "how many bytes is it?".
+ * @param value A pointer to the value that we want to write into the buffer
+ * @param convert_to_network 1 to convert the value into network-byte-order, otherwise 0 for no conversion.
+ *
+ * NOTE: 
+ * - Intends to mainly be a helper function to create_response.
+ * - If len > 1, we know that the value ("payload") is a multi-byte type.
+ * - Limitations: Since len is a uint8_t we can only represent payloads of size [0, 255] bytes. If we wanted to represent bigger payloads, 
+ * we'd simply upgrade to uint16_t, allowing us to write values of size [0, 65335] bytes, which will later be useful for messages. Of course, 
+ * if we decide to use uint16_t, we'd need to ensure the 16-bit integer is represented in network-byte-order and probably use memcpy to copy 
+ * from bytes from the integer into the buffer.
+ */
+void write_tlv(uint8_t **buf, tlv_tag_t tag, uint8_t len, const void *value, int convert_to_network);
 
 /**
- * Opens a listening socket at the given port
+ * Fully read one message from a connection socket 
  * 
- * @param port Port number that we're launching the server at.
- * @return The fd of the listening socket we've opened. Otherwise -1 on error.
+ * @param connfd File descriptor for the connection socket we're reading from.
+ * @param msg Pointer to message_t struct that we're storing the message information in.
+ * @return 0 on success, -1 otherwise
  */
-int open_listenfd(char *port);
+int read_one_message(int connfd, message_t* msg);
 
 /**
- * Thread routine that has an infinite server loop.
+ * Writes one message across the TCP socket 
  * 
- * @param vargp A pointer to the connfd for the thread
+ * @param connfd Descriptor for the connection socket 
+ * @param response Response message that we want to write to the remote peer.
+ * @return Number of bytes sent, otherwise -1 on error
  * 
- * NOTE: This is the thread routine that each thread uses to serve a client.
- * We want to maintain the connection until the user disconnects, so 
- * we're probably going to run a while loop
+ * NOTE: 
+ * It's probably best for this function to assume that 
+ * the fields and payload in the response messaeg to already be 
+ * in network byte order.
  */
-void *serve_connection(void *vargp);
+int write_one_message(int connfd, message_t* response);
+
+/**
+ * Prompts input for a value within a given range.
+ * 
+ * @param prompt Input prompt we're going to repeat.
+ * @param min Minimum valid value.
+ * @param max Maximum valid value.
+ * @return The valid integer value that they inputted.
+ */
+int get_valid_input_range(char *prompt, int min, int max);
 
 #endif

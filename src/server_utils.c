@@ -1,5 +1,5 @@
 #include "shared.h"
-
+#include "server_utils.h"
 
 const char* response_messages[] = {
   [RESP_OK] = "Success",
@@ -10,7 +10,6 @@ const char* response_messages[] = {
   [RESP_ERROR_INTERNAL] = "Internal server error",
   [RESP_ERROR_UNKNOWN_COMMAND] = "Unknown command"
 };
-
 
 // Dynamically allocated array representing all connected clients on the TCP server.
 // This is indexed by connfd to make things a little easier.
@@ -23,58 +22,6 @@ static const char* user_file_path = "./src/user_file_db.csv";
 static pthread_mutex_t user_file_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 
-/**
- * Writes a TLV into a buffer.
- * 
- * @param buf A double pointer to a buffer. The motivation is that with a single pointer *buf
- *            modifications like buf += 1, doesn't update the pointer in the caller. However by 
- *            using a double pointer, we'll be able to update the buffer pointer in the caller.
- * @param tag The tag that we're giving the TLV; "what is it?".
- * @param len The size of the data (in bytes from 0-255) of the value, "how many bytes is it?".
- * @param value A pointer to the value that we want to write into the buffer
- * @param convert_to_network 1 to convert the value into network-byte-order, otherwise 0 for no conversion.
- *
- * NOTE: 
- * - Intends to mainly be a helper function to create_response.
- * - If len > 1, we know that the value ("payload") is a multi-byte type.
- * - Limitations: Since len is a uint8_t we can only represent payloads of size [0, 255] bytes. If we wanted to represent bigger payloads, 
- * we'd simply upgrade to uint16_t, allowing us to write values of size [0, 65335] bytes, which will later be useful for messages. Of course, 
- * if we decide to use uint16_t, we'd need to ensure the 16-bit integer is represented in network-byte-order and probably use memcpy to copy 
- * from bytes from the integer into the buffer.
- */
-void write_tlv(uint8_t **buf, tlv_tag_t tag, uint8_t len, const void *value, int convert_to_network) {
-  
-  // 1. Write tag and length (1 byte each, no flipping)
-  *(*buf)++ = tag; // equivalent to **buf = tag, then (*buf)++
-  *(*buf)++ = len;
-
-  // 2. Write the convered (if necessary) byte seqeunce into the buffer
-  if (convert_to_network) {
-    // If we want to convert a multi-byte number into network-byte-order. Three cases:
-    // a. Converting a 2-byte sequence
-    // b. Converting a 4-byte sequence
-    // c. Converting a 1-byte sequence (no conversion needed even if the caller wants it)
-    if (len == 2) {
-      uint16_t val;
-      memcpy(&val, value, 2);
-      val = htons(val);
-      memcpy(*buf, &val, 2);
-    } else if (len == 4) {
-      uint32_t val;
-      memcpy(&val, value, 4);
-      val = htonl(val);
-      memcpy(*buf, &val, 4);
-    } else {
-      memcpy(*buf, value, len);
-    }
-  } else {
-    // Else, the caller intends to write a string into the buffer
-    memcpy(*buf, value, len);
-  }
-
-  // 3. Advance buffer pointer by the byte size of the value.
-  *buf += len;
-}
 
 // -----------------------------------
 // Startup and Shutdown
@@ -354,7 +301,6 @@ int parse_credentials(message_t *msg, char *username, char *password) {
         }
         memcpy(username, buf_ptr, length); 
         username[length] = '\0';
-        buf_ptr += length;
         has_username = 1;
         break;
       case TAG_PASSWORD:
@@ -368,15 +314,15 @@ int parse_credentials(message_t *msg, char *username, char *password) {
         }
         memcpy(password, buf_ptr, length);
         password[length] = '\0';
-        buf_ptr += length;
         has_password = 1;
         break;
       default:
         // Unknown tag - skip it (forward compatibility?)
         fprintf(stderr, "Unknown TLV tag '%d', skipping %d bytes\n", tag, length);
-        buf_ptr += length;
         break;
     }
+
+    buf_ptr += length;
   }
 
   // Validate that both fields were sent
@@ -466,6 +412,12 @@ int login_user(int connfd, message_t *msg, uint8_t *extra_data, uint32_t *extra_
   }
 
   update_conn_with_user(connfd, user);
+
+  // Write TLVs for userid, username, and password 
+  uint8_t **ptr = &extra_data;
+  write_tlv(ptr, TAG_USER_ID, sizeof(user->id), &user->id, 1);
+  write_tlv(ptr, TAG_USERNAME, strlen(user->username), user->username, 0);
+  write_tlv(ptr, TAG_PASSWORD, strlen(user->password), user->password, 0);
   return RESP_OK;
 }
 
@@ -698,102 +650,6 @@ int create_response(message_t *msg, response_code_t rc, uint8_t *data_buf, uint3
     return -1;
   }
   return 0;
-}
-
-/**
- * Fully read one message from a connection socket 
- * 
- * @param connfd File descriptor for the connection socket we're reading from.
- * @param msg Pointer to message_t struct that we're storing the message information in.
- * @return 0 on success, -1 otherwise
- */
-int read_one_message(int connfd, message_t* msg) {
-  
-  // 1. Read message header
-  uint8_t header[MSG_HEADER_SIZE];
-  int bytes_to_read = MSG_HEADER_SIZE;
-  uint8_t *buf_ptr = header;
-  while (bytes_to_read > 0) {
-    int bytes_read = read(connfd, buf_ptr, bytes_to_read);
-    if (bytes_read == 0) {
-      fprintf(stderr, "Unexpected EOF when reading msg header!\n");
-      return -1;
-    }
-    if (bytes_read == -1) {
-      fprintf(stderr, "read error when reading msg header: %s\n", strerror(errno));
-      return -1;
-    }
-    buf_ptr += bytes_read;
-    bytes_to_read -= bytes_read;
-  }
-
-  // 2. Parse Header Fields into msg_t
-  // a. bytes 0-2 are version, type, and flags
-  // b. bytes 3-6 represent the payload length. A sequence of bytes like this
-  // needs to be converted into host byte order.
-  msg->version = msg->payload[0];
-  msg->type = msg->payload[1];
-  msg->flags = msg->payload[2];
-  uint32_t payload_length;
-  memcpy(&payload_length, &header[3], 4); 
-  msg->payload_length = ntohl(payload_length);
-
-  // 3. Validate payload size
-  if (msg->payload_length > MSG_MAX_PAYLOAD_SIZE) {
-    fprintf(stderr, "read_one_message: Payload of size '%d' is bigger than maximum!\n", msg->payload_length);
-    return -1;
-  }
-
-  // 4. Read the message payload into msg->payload
-  bytes_to_read = msg->payload_length;
-  buf_ptr = (uint8_t *)msg->payload;
-  while (bytes_to_read > 0) {
-    int bytes_read = read(connfd, buf_ptr, bytes_to_read);
-    if (bytes_read == 0) {
-      fprintf(stderr, "Unexpected EOF when reading msg payload!\n");
-      return -1;
-    }
-    if (bytes_read == -1) {
-      fprintf(stderr, "read error when reading msg payload: %s\n", strerror(errno));
-      return -1;
-    }    
-    buf_ptr += bytes_read;
-    bytes_to_read -= bytes_read;
-  }
-  return 0;
-}
-
-/**
- * Writes one message across the TCP socket 
- * 
- * @param connfd Descriptor for the connection socket 
- * @param response Response message that we want to write to the remote peer.
- * @return Number of bytes sent, otherwise -1 on error
- * 
- * NOTE: 
- * It's probably best for this function to assume that 
- * the fields and payload in the response messaeg to already be 
- * in network byte order.
- */
-int write_one_message(int connfd, message_t* response) { 
-  uint8_t message_buffer[MSG_HEADER_SIZE+MSG_MAX_PAYLOAD_SIZE];
-
-  // Copy fields; for multi-byte fields like payload_length ensure they're in big-endian
-  uint8_t *buf_ptr = message_buffer;
-  *buf_ptr++ = response->version;
-  *buf_ptr++ = response->type;
-  uint32_t net_len = htonl(response->payload_length);
-  memcpy(buf_ptr, &net_len, sizeof(uint32_t));
-  buf_ptr += sizeof(uint32_t);
-
-  // Copy the main payload
-  memcpy(buf_ptr, response->payload, response->payload_length);
-  buf_ptr += response->payload_length;
-
-  // Send it across socket
-  size_t total_bytes = buf_ptr - message_buffer;
-  int num_bytes_sent = send(connfd, message_buffer, total_bytes, 0);
-  return num_bytes_sent;
 }
 
 /**
