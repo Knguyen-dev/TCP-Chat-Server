@@ -5,9 +5,10 @@ BUILD_DIR = build
 SRC_DIR   = src
 PORT     ?= 8080
 
-# File groups: We have client and server code
-SERVER_SRCS = $(SRC_DIR)/server.c $(SRC_DIR)/server_internals.c
-CLIENT_SRCS = $(SRC_DIR)/client.c 
+# File groups: Shared code, client specific, and server specific code
+SHARED_SRC = $(SRC_DIR)/shared.c $(SRC_DIR)/protocol.c
+SERVER_SRCS = $(SRC_DIR)/server.c $(SRC_DIR)/server_utils.c $(SHARED_SRC)
+CLIENT_SRCS = $(SRC_DIR)/client.c $(SRC_DIR)/client_utils.c $(SHARED_SRC)
 
 # Object files (maps src/*.c to build/*.o); source to object files
 SERVER_OBJS = $(SERVER_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
@@ -50,6 +51,9 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
 # Runs the TCP server, "server.out"
 run-server: build-server
 	./$(BUILD_DIR)/server.out $(PORT)
+
+run-client: build-client
+	./$(BUILD_DIR)/client.out
 
 # Destroys build directory for cleanups.
 clean:
