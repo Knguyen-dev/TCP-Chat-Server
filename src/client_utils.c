@@ -1,246 +1,275 @@
 #include "client_utils.h"
 
-int create_registration_message(char *username, char *password, message_t *request) {
-  request->version = 1;
-  request->type = REGISTER;
-  request->flags = 0;
-  uint8_t *payload_start = (uint8_t *)request->payload;
-  uint8_t **cursor = &payload_start;
-  write_tlv(cursor, TAG_USERNAME, strlen(username), username, 0);
-  write_tlv(cursor, TAG_PASSWORD, strlen(password), password, 0);
-  uint32_t payload_len = (uint32_t)(*cursor-payload_start);
-  if (payload_len > MSG_MAX_PAYLOAD_SIZE) {
-    printf("Registration Failed: Payload of size %d bytes exceeds maximum of %d!\n", payload_len, MSG_MAX_PAYLOAD_SIZE);
-    return -1;
-  }
-  return 0;
-}
+// ---------------------------
+// Client Service API e.g. login, registration, messaging.
+// ---------------------------
 
+/**
+ * Handles prompting user input and sending data over the wire.
+ * 
+ * @param clientfd The client fd associated with our TCP connection
+ * @return 0 on success, otherwise -1 on error.
+ */
 int handle_client_registration(int clientfd) {
-  char username[MAX_USERNAME_SIZE+1];
-  char password[MAX_PASSWORD_SIZE+1];
-
-  printf("Enter a username (max %d characters): ", MAX_USERNAME_SIZE);
-  if (fgets(username, sizeof(username), stdin)) {
-    username[strcspn(username, "\n")] = '\0'; // strip newline character from fgets string
-  } else {
-    fprintf(stderr, "fgets() Failed: Error reading username!\n");
-    return -1;
-  }
-
-  printf("Enter a password (max %d characters): ", MAX_PASSWORD_SIZE);
-  if (fgets(password, sizeof(password), stdin)) {
-    password[strcspn(password, "\n")] = '\0';
-  } else {
-    fprintf(stderr, "fgets() Failed: Error reading password!\n");
-    return -1;
-  }
-
+  registration_credentials_t credentials = {0};
+  char username_prompt[50];
+  char password_prompt[50];
+  snprintf(username_prompt, sizeof(username_prompt), "Enter a username (max %d characters): ", MAX_USERNAME_SIZE);
+  snprintf(password_prompt, sizeof(password_prompt), "Enter a password (max %d characters): ", MAX_PASSWORD_SIZE);
+  get_stdin(username_prompt, credentials.username, sizeof(credentials.username));
+  get_stdin(password_prompt, credentials.password, sizeof(credentials.password));
+  
   // 1. Create request message
   message_t request_message = {0};
-  int result = create_registration_message(username, password, &request_message);
-  if (result == -1) {
+  if (build_register_request(&request_message, &credentials) == -1) {
     return -1;
   }
 
   // 2. Send it over the wire 
-  result = write_one_message(clientfd, &request_message);
-  if (result == -1) {
+  if (write_one_message(clientfd, &request_message) == -1) {
     return -1;
   }
 
   // 3. Read the response from the server
-  message_t response_message = {0};
-  result = read_one_message(clientfd, &response_message);
-  if (result == -1) {
+  message_t response = {0};
+  if (read_one_message(clientfd, &response) == -1) {
     return -1;
   }
 
-  // 4. Parse payload
-  // a. Response code tlv; should have a 1-byte value.
-  // b. Response message tlv
-  response_code_t rc = 0;
-  char message[48];
-  uint32_t bytes_to_read = response_message.payload_length;
-  uint8_t* payload_ptr = response_message.payload;
+  printf("Server Response (code=%d): %s\n", response.rc, response_messages[response.rc]);
 
-  while (bytes_to_read > 0) {
-    // Parse 1 byte Tag, 1 byte Length, and variable-length Value
-    tlv_tag_t tag = *payload_ptr;
-    payload_ptr++;
-    uint8_t num_bytes = *payload_ptr;
-    payload_ptr++;
-    switch (tag) {
-      case TAG_RESPONSE_CODE:
-        memcpy(&rc, payload_ptr, num_bytes);
-        break;
-      case TAG_RESPONSE_MESSAGE:
-        memcpy(message, payload_ptr, num_bytes);
-        message[num_bytes] = '\0';
-        break;
-      default:
-        fprintf(stderr, "Unknown TLV tag '%d', skipping %d bytes\n", tag, length);
-    }
-    payload_ptr += num_bytes;
-  }
-
-  printf("Server Says (code=%d): %s", rc, message);
+  // TODO: The payload could be used to add extra details of the error or success
   return 0;
 }
 
-int create_login_message(char *username, char* password, message_t *request) {
-  request->version = 1;
-  request->type = LOGIN;
-  request->flags = 0;
-  uint8_t *payload_start = (uint8_t *)request->payload;
-  uint8_t **cursor = &payload_start;
-  write_tlv(cursor, TAG_USERNAME, strlen(username), username, 0);
-  write_tlv(cursor, TAG_PASSWORD, strlen(password), password, 0);
-  uint32_t payload_len = (uint32_t)(*cursor-payload_start);
-  if (payload_len > MSG_MAX_PAYLOAD_SIZE) {
-    printf("Login Failed: Payload of size %d bytes exceeds maximum of %d!\n", payload_len, MSG_MAX_PAYLOAD_SIZE);
-    return -1;
-  }
-  return 0;
-}
-
+/**
+ * Handles prompting user input, and attempting a login for the user.
+ * @param clientfd Client fd that's used in the socket connection.
+ * @param user Pointer to a user struct that we'll populate with the info of the authenticated user.
+ * @return 0 on successful login, otherwise -1.
+ */
 int handle_client_login(int clientfd, user_t *user) {
-  char input_username[MAX_USERNAME_SIZE+1];
-  char input_password[MAX_PASSWORD_SIZE+1];
+  login_credentials_t credentials = {0};
+  char username_prompt[50];
+  char password_prompt[50];
+  snprintf(username_prompt, sizeof(username_prompt), "Enter your username (max %d characters): ", MAX_USERNAME_SIZE);
+  snprintf(password_prompt, sizeof(password_prompt), "Enter your password (max %d characters): ", MAX_PASSWORD_SIZE);
+  get_stdin(username_prompt, credentials.username, sizeof(credentials.username));
+  get_stdin(password_prompt, credentials.password, sizeof(credentials.password));
 
-  printf("Enter your username: ");
-  scanf("%s", &input_username);
-  printf("Enter your password: ");
-  scanf("%d", &input_password);
+  // 1. Create request message and send it across the wire
+  message_t request = {0};
+  if (build_login_request(&request, &credentials) != 0) {
+    return -1;
+  }
+  if (write_one_message(clientfd, &request) == -1) {
+    return -1;
+  } 
 
-  // 1. Create request message
-  message_t request_message = {0};
-  int result = create_login_message(input_username, input_password, &request_message);
-  if (result == -1) {
+  // 2. Read response from server to see if things worked
+  message_t response = {0};
+  if (read_one_message(clientfd, &response) == -1) {
     return -1;
   }
 
-  // 2. Send it over the wire 
-  result = write_one_message(clientfd, &request_message);
-  if (result == -1) {
+  // 3. Parse response
+  if (response.rc != RESP_OK) {
+    printf("Login Failed (code=%d): %s\n", response.rc, response_messages[response.rc]);
     return -1;
   }
 
-  // 3. Read a response from the server
-  message_t response_message = {0};
-  result = read_one_message(clientfd, &response_message);
-  if (result == -1) {
-    return -1;
-  }
+  // Populate user struct
+  strcpy(user->username, credentials.username);
+  user->id = 0; // TODO: Parse from response if server sends it
 
-  // 4. Parse payload
-  // a. Response code tlv; should have a 1-byte value.
-  // b. Response message tlv
-  response_code_t rc = 0;
-  char message[48];
-  uint32_t bytes_to_read = response_message.payload_length;
-  uint8_t* payload_ptr = response_message.payload;
-  while (bytes_to_read > 0) {
-    // Parse 1 byte Tag, 1 byte Length, and variable-length Value
-    tlv_tag_t tag = *payload_ptr;
-    payload_ptr++;
-    uint8_t num_bytes = *payload_ptr;
-    payload_ptr++;
-    switch (tag) {
-      case TAG_RESPONSE_CODE:
-        memcpy(&rc, payload_ptr, num_bytes);
-        break;
-      case TAG_RESPONSE_MESSAGE:
-        memcpy(message, payload_ptr, num_bytes);
-        message[num_bytes] = '\0';
-        break;
-      case TAG_USER_ID:
-        memcpy(&user->id, payload_ptr, num_bytes);
-        user->id = ntohl(user->id);
-        break;
-      case TAG_USERNAME:
-        memcpy(user->username, payload_ptr, num_bytes);
-        user->username[num_bytes] = '\0';
-        break;
-      case TAG_PASSWORD:
-        memcpy(user->password, payload_ptr, num_bytes);
-        user->password[num_bytes] = '\0';
-        break;
-      default:
-        fprintf(stderr, "Unknown TLV tag '%d', skipping %d bytes\n", tag, length);
-    }
-    payload_ptr += num_bytes;
-  }
-
-  printf("Server Says (code=%d): %s", rc, message);
+  printf("Now authenticated as '%s'!\n", credentials.username);
   return 0;
 }
 
-int create_world_message(char* message_content, message_t *request) {
-  request->version = 1;
-  request->type = CHAT;
-  request->flags = 0;
-  uint8_t *payload_start = (uint8_t *)request->payload;
-  uint8_t **cursor = &payload_start;
-
-  // NOTE: TLV with TAG_WORLD won't have a value, so we'll say the length is 0 bytes.
-  write_tlv(cursor, TAG_WORLD, 0, 0, 0); 
-  write_tlv(cursor, TAG_MESSAGE_CONTENT, strlen(message_content), message_content, 0);
-  uint32_t payload_len = (uint32_t)(*cursor-payload_start);
-  if (payload_len > MSG_MAX_PAYLOAD_SIZE) {
-    printf("World Message Failed: Payload of size %d bytes exceeds maximum of %d!\n", payload_len, MSG_MAX_PAYLOAD_SIZE);
+/**
+ * Handles broadcasting a message to all other users connected to the TCP server.
+ * @param clientfd File descriptor linked to the TCP connection socket the client has with the server.
+ * @param user User that the client is logged in as.
+ * @param message_content The text or message content that we're sending to all other users.
+ */
+void handle_world_message(int clientfd, user_t *user, char* message_content) {
+  // 1. Build world broadcast request message
+  world_broadcast_t broadcast = {0};
+  strcpy(&broadcast.sender_username, &user->username);
+  strcpy(&broadcast.message_content, &message_content);
+  message_t request = {0};
+  if (build_world_broadcast(&request, &broadcast) != 0) {
     return -1;
   }
+
+  // 2. Send world broadcast message over TCP
+  if (write_one_message(clientfd, &request) != 0) {
+    return -1;
+  }
+
+  // 3. Read response message from the server
+  // a. If bad response code, output failure message
+  // b. Otherwise, output message indicating user's message was broadcasted
+  message_t response = {0};
+  if (read_one_message(clientfd, &response) != 0) {
+    return -1;
+  }
+  if (response.rc != 0) {
+    printf("Server Failure (code=%d): Your message wasn't broadcasted.\n");
+    return -1;
+  }
+  printf("%s> %s\n", user->username, broadcast.message_content);
   return 0;
 }
 
-int handle_world_message(int clientfd, user_t *user) {
+/**
+ * Handles sending a message to a single remote peer through the TCP server.
+ * @param clientfd File descriptor linked to the TCP connection socket the client has with the server.
+ * @param user User that the client is logged in as.
+ * @param recipient_username The username of the recipient user that the message is being sent to.
+ * @param message_content The text or message content that we're sending to the recipient user.
+ */
+void handle_peer_message(int clientfd, user_t* user, char* recipient_username, char* message_content) {
+  // 1. Create world broadcast request and send it over the wire
+  p2p_broadcast_t broadcast = {0};
+  strcpy(&broadcast.sender_username, &user->username);
+  strcpy(&broadcast.recipient_username, recipient_username);
+  strcpy(&broadcast.message_content, message_content);
+  message_t request = {0};
+  if (build_p2p_broadcast(&request, &broadcast) != 0) {
+    return -1;
+  }
+  if (write_one_message(clientfd, &request) != 0) {
+    return -1;
+  }
+  
+  // 2. Read response from the server
+  message_t response = {0};
+  if (read_one_message(clientfd, &response) != 0) {
+    return -1;
+  }
 
-  char message_content[MAX_MSG_CONTENT_SIZE+1];
-  printf("Enter your message (max '%d' characters): ", MAX_MSG_CONTENT_SIZE);
-  if (fgets(message_content, sizeof(message_content), stdin)) {
-    message_content[strcspn(message_content, "\n")] = '\0';
+  // 3. Output results to the client
+  if (response.rc == 0) {
+    printf("%s to %s> %s\n", user->username, recipient_username, message_content);
   } else {
-    fprintf(stderr, "fgets() Failed: Error reading password!\n");
-    return -1;
+    printf("Server Failure (code=%d): P2P message wasn't sent!\n");
   }
+}
 
-  message_t request_message = {0};
-  int result = create_world_message(message_content, &request_message);
-  if (result == -1) {
-    return -1;
+/**
+ * Handles receiving broadcast notification messages from the server. 
+ */
+void handle_broadcast_notification(int clientfd) {
+  message_t response = {0};
+  if (read_one_message(clientfd, &response) != 0) {
+    return;
   }
-  result = write_one_message(clientfd, &request_message);
-  if (result == -1) {
-    fprintf(stderr, "write_one_message() failed: %s\n", strerror(errno));
-    return -1;
+  if (response.type != CHAT) {
+    // NOTE: This shouldn't really happen.
+    printf("Server response wasn't a chat message!\n");
+    return;
   }
-
-  // TODO: Almost done
-
+  int broadcast_type = peek_broadcast_type(&response);
+  
+  switch (broadcast_type) {
+    case TAG_P2P_BROADCAST: {
+      p2p_broadcast_t broadcast = {0};
+      parse_p2p_broadcast_notification(&response, &broadcast);
+      printf("%s whispers> %s\n", broadcast.sender_username, broadcast.message_content);
+      break;
+    }
+    case TAG_WORLD_BROADCAST: {
+      world_broadcast_t broadcast = {0};
+      parse_world_broadcast_notification(&response, &broadcast);
+      printf("%s says> %s\n", broadcast.sender_username, broadcast.message_content);
+      break;
+    }
+    default: {
+      // NOTE: Shouldn't really happen.
+      printf("Unknown broadcast_type '%d'!\n", broadcast_type);
+    }
+  }
 }
 
 
+// ---------------------------
+// Client Loop and user input
+// ---------------------------
 
+void shell(int clientfd, user_t* user) {
+  char prompt[100] = {0};
+  char command_buffer[10 + MAX_USERNAME_SIZE + MAX_MSG_CONTENT_SIZE + 1]; // Enough for "/<command>, where command=world or p2p" and additional args
+  
+  // Prompt string uses the authenticated user's username
+  snprintf(prompt, sizeof(prompt), "%s> ", user->username);
+  get_stdin(prompt, command_buffer, sizeof(command_buffer));
 
-
-int create_peer_message(char* recipient_username, char* message_content, message_t *request) {
-  request->version = 1;
-  request->type = CHAT;
-  request->flags = 0;
-  uint8_t *payload_start = (uint8_t *)request->payload;
-  uint8_t **cursor = &payload_start;
-  write_tlv(cursor, TAG_USERNAME, strlen(recipient_username), recipient_username, 0);
-  write_tlv(cursor, TAG_MESSAGE_CONTENT, strlen(message_content), message_content, 0);
-  uint32_t payload_len = (uint32_t)(*cursor-payload_start);
-  if (payload_len > MSG_MAX_PAYLOAD_SIZE) {
-    printf("Peer Message Failed: Payload of size %d bytes exceeds maximum of %d!\n", payload_len, MSG_MAX_PAYLOAD_SIZE);
-    return -1;
+  char* command = strtok(command_buffer, " ");
+  if (command == NULL) {
+    return;
   }
-  return 0;
+
+  if (strcmp(command, "/p2p") == 0) {
+    char* recipient_username = strtok(NULL, " ");
+    char* message = strtok(NULL, ""); // get the remaining string
+    if (!recipient_username || !message) {
+      printf("Error: Usage '/p2p <recipient_username> <Your Message>'\n");
+      return;
+    }
+    handle_peer_message(clientfd, user, recipient_username, message);    
+  } else if (strcmp(command, "/world") == 0) {
+    char* message = strtok(NULL, "");
+    if (!message) {
+      printf("Error: Usage '/world <your message>\n");
+      return;
+    }
+    handle_world_message(clientfd, user, message);
+  } else {
+    printf("Unknown Command: %s\n", command);
+  }  
 }
 
-int create_client_connection(char* ip, short port) {
+
+/**
+ * Runs an event loop for the client
+ * 
+ * @param clientfd fd for the TCP connection socket.
+ */
+void run_messaging_loop(int clientfd, user_t* user) {
+  struct pollfd fds[2];
+  fds[0].fd = STDIN_FILENO;
+  fds[0].events = POLLIN;
+  fds[1].fd = clientfd;
+  fds[1].events = POLLIN;
+  while (1) {
+    int ret = poll(fds, (nfds_t)sizeof(fds), -1);
+    if (ret == -1) {
+      fprintf(stderr, "Poll Error: %s\n", strerror(errno));
+      break;
+    }
+
+    // TODO: How 
+
+    // Check if the server sent something
+    if (fds[1].revents & POLLIN) {
+      handle_broadcast_notification(clientfd);
+    }
+
+    // Check if the user is typing something 
+    // NOTE: I'm assuming this would check when the input stream has data?
+    // I'm assuming this doesn't just trigger as I'm typing in something.
+    if (fds[0].revents & POLLIN) {
+      shell(clientfd, user);
+    }
+  }
+}
+
+
+// -------------------------------
+// Network Connection and Setup
+// -------------------------------
+int create_client_connection(char* ip, short port) {  
   int fd = socket(AF_INET, SOCK_STREAM, 0);
   if (fd < 0) {
     fprintf(stderr, "socket() error: %s!\n", strerror(errno));
@@ -252,13 +281,15 @@ int create_client_connection(char* ip, short port) {
   server_addr.sin_family = AF_INET;
   server_addr.sin_port = htons(port);
 
-  int result = inet_ptons(AF_INET, ip, &server_addr.sin_addr);
+  // Verify input IP address and insert it into server_addr
+  int result = inet_pton(AF_INET, ip, &server_addr.sin_addr);
   if (result <= 0) {
     close(fd);
     fprintf(stderr, "inet_ptons() failed: Invalid IP address '%s'!\n", ip);
     return -1;
   }
 
+  // Attempt to connect to server IP 
   int conn_result = connect(fd, (struct sockaddr*)&server_addr, sizeof(server_addr));
   if (conn_result == -1) {
     close(fd);

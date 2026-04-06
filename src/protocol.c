@@ -46,88 +46,76 @@ void write_tlv(uint8_t **buf, tlv_tag_t tag, uint8_t len, const void *value, int
 
 int read_one_message(int connfd, message_t* msg) {
   
-  // 1. Read message header
+  // 1. Read message header and copy it to the data_buf
   uint8_t header[MSG_HEADER_SIZE];
   int bytes_to_read = MSG_HEADER_SIZE;
   uint8_t *buf_ptr = header;
   while (bytes_to_read > 0) {
     int bytes_read = read(connfd, buf_ptr, bytes_to_read);
     if (bytes_read == 0) {
-      fprintf(stderr, "Unexpected EOF when reading msg header!\n");
+      LOG_ERROR("Unexpected EOF when reading msg header!\n");
       return -1;
     }
     if (bytes_read == -1) {
-      fprintf(stderr, "read error when reading msg header: %s\n", strerror(errno));
+      LOG_ERROR("read error when reading msg header: %s\n", strerror(errno));
       return -1;
     }
     buf_ptr += bytes_read;
     bytes_to_read -= bytes_read;
   }
+  memcpy(msg->data_buf, header, MSG_HEADER_SIZE);
 
   // 2. Parse Header Fields into msg_t
-  // a. bytes 0-2 are version, type, and flags
-  // b. bytes 3-6 represent the payload length. A sequence of bytes like this
-  // needs to be converted into host byte order.
-  msg->version = msg->payload[0];
-  msg->type = msg->payload[1];
-  msg->flags = msg->payload[2];
+  // a. bytes 0-2 are version, type, and response code
+  // b. bytes 3-6 represent the payload length; handle byte order conversion and validate payload size
+  msg->version = msg->data_buf[0];
+  msg->type = msg->data_buf[1];
+  msg->rc = msg->data_buf[2];
   uint32_t payload_length;
-  memcpy(&payload_length, &header[3], 4); 
+  memcpy(&payload_length, &msg->data_buf[3], 4); 
   msg->payload_length = ntohl(payload_length);
-
-  // 3. Validate payload size
   if (msg->payload_length > MSG_MAX_PAYLOAD_SIZE) {
-    fprintf(stderr, "read_one_message: Payload of size '%d' is bigger than maximum!\n", msg->payload_length);
+    LOG_ERROR("read_one_message: Payload of size '%d' is bigger than maximum!\n", msg->payload_length);
     return -1;
   }
 
-  // 4. Read the message payload into msg->payload
+  // 3. Read payload into data_buf; following header fields
   bytes_to_read = msg->payload_length;
-  buf_ptr = (uint8_t *)msg->payload;
+  buf_ptr = msg->data_buf + MSG_HEADER_SIZE;
   while (bytes_to_read > 0) {
     int bytes_read = read(connfd, buf_ptr, bytes_to_read);
     if (bytes_read == 0) {
-      fprintf(stderr, "Unexpected EOF when reading msg payload!\n");
+      LOG_ERROR("Unexpected EOF when reading msg payload!\n");
       return -1;
     }
     if (bytes_read == -1) {
-      fprintf(stderr, "read error when reading msg payload: %s\n", strerror(errno));
+      LOG_ERROR("read error when reading msg payload: %s\n", strerror(errno));
       return -1;
     }    
     buf_ptr += bytes_read;
     bytes_to_read -= bytes_read;
   }
+
+  msg->data_len = MSG_HEADER_SIZE + msg->payload_length;
   return 0;
 }
 
 int write_one_message(int connfd, message_t* response) { 
-  uint8_t message_buffer[MSG_HEADER_SIZE+MSG_MAX_PAYLOAD_SIZE];
-
-  // Copy fields; for multi-byte fields like payload_length ensure they're in big-endian
-  uint8_t *buf_ptr = message_buffer;
-  *buf_ptr++ = response->version;
-  *buf_ptr++ = response->type;
-  uint32_t net_len = htonl(response->payload_length);
-  memcpy(buf_ptr, &net_len, sizeof(uint32_t));
-  buf_ptr += sizeof(uint32_t);
-
-  // Copy the main payload
-  memcpy(buf_ptr, response->payload, response->payload_length);
-  buf_ptr += response->payload_length;
-
-  // Send it across socket
-
-  // TODO: Wait this is wrong right? Or no because this is a blocking send
-  size_t total_bytes = buf_ptr - message_buffer;
-  int num_bytes_sent = send(connfd, message_buffer, total_bytes, 0);
+  // Send the data_buf directly, which contains header + payload in network byte order
+  int num_bytes_sent = send(connfd, response->data_buf, response->data_len, 0);
+  if (num_bytes_sent == -1) {
+    LOG_ERROR("Failed to write one message with errno '%s'\n", strerror(errno));
+  }
   return num_bytes_sent;
 }
 
 int build_register_request(message_t *request, registration_credentials_t *credentials) {
   request->version = 1;
   request->type = REGISTER;
-  request->flags = 0;
-  uint8_t *payload_start = (uint8_t *)request->payload;
+  request->rc = 0;
+
+  // Validate credentials and write them into the payload of the data_buf
+  uint8_t *payload_start = request->data_buf + MSG_HEADER_SIZE;
   uint8_t **cursor = &payload_start;
   size_t username_len = strlen(credentials->username);
   size_t password_len = strlen(credentials->password);
@@ -143,31 +131,40 @@ int build_register_request(message_t *request, registration_credentials_t *crede
 
   write_tlv(cursor, TAG_USERNAME, username_len, credentials->username, 0);
   write_tlv(cursor, TAG_PASSWORD, password_len, credentials->password, 0);
-  uint32_t payload_len = (uint32_t)(*cursor-payload_start);
+  uint32_t payload_len = (uint32_t)(*cursor - payload_start);
   if (payload_len > MSG_MAX_PAYLOAD_SIZE) {
     LOG_ERROR("Payload of size %d bytes exceeds maximum of %d!\n", payload_len, MSG_MAX_PAYLOAD_SIZE);
     return -1;
   }
   request->payload_length = payload_len;
+
+  // Write message header to data_buf
+  request->data_buf[0] = request->version;
+  request->data_buf[1] = request->type;
+  request->data_buf[2] = request->rc;
+  uint32_t net_len = htonl(request->payload_length);
+  memcpy(&request->data_buf[3], &net_len, sizeof(uint32_t));
+  request->data_len = MSG_HEADER_SIZE + payload_len;
+
   return 0;
 }
 
 int parse_register_request(message_t *msg, registration_credentials_t *credentials) {
-  uint8_t *buf_ptr = (uint8_t *)msg->payload;
-  uint8_t *end_ptr = buf_ptr + msg->payload_length;
+  uint8_t *payload_ptr = msg->data_buf + MSG_HEADER_SIZE;
+  uint8_t *payload_end = payload_ptr + msg->payload_length;
   int has_username = 0;
   int has_password = 0;
-  while (buf_ptr < end_ptr) {
-    if (buf_ptr + 2 > end_ptr) {
+  while (payload_ptr < payload_end) {
+    if (payload_ptr + 2 > payload_end) {
       // Check if we have at least tag (1byte) + length (1byte).
       LOG_ERROR("Malformed TLV: incomplete header\n");
       return RESP_ERROR_MALFORMED;
     }
 
-    uint8_t tag = *buf_ptr++;
-    uint8_t num_bytes = *buf_ptr++;
+    uint8_t tag = *payload_ptr++;
+    uint8_t num_bytes = *payload_ptr++;
 
-    if (buf_ptr + num_bytes > end_ptr) {
+    if (payload_ptr + num_bytes > payload_end) {
       // Check to see if we have the full value from the TLV
       LOG_ERROR("Malformed TLV: incomplete value!\n");
       return RESP_ERROR_MALFORMED;
@@ -179,7 +176,7 @@ int parse_register_request(message_t *msg, registration_credentials_t *credentia
           LOG_ERROR("Username of length %d surpasses maximum username size %d!\n", num_bytes, MAX_USERNAME_SIZE);
           return RESP_ERROR_MALFORMED;
         }
-        memcpy(credentials->username, buf_ptr, num_bytes);
+        memcpy(credentials->username, payload_ptr, num_bytes);
         credentials->username[num_bytes] = '\0';
         has_username = 1;
         break;
@@ -188,14 +185,14 @@ int parse_register_request(message_t *msg, registration_credentials_t *credentia
           LOG_ERROR("Password of length %d surpasses maximum password size %d!\n", num_bytes, MAX_PASSWORD_SIZE);
           return RESP_ERROR_MALFORMED;
         }
-        memcpy(credentials->password, buf_ptr, num_bytes);
+        memcpy(credentials->password, payload_ptr, num_bytes);
         credentials->password[num_bytes] = '\0';
         has_password = 1;
         break;
       default:
         LOG_ERROR("Unknown TLV tag '%d', skipping %d bytes!\n", tag, num_bytes);
     }
-    buf_ptr += num_bytes;
+    payload_ptr += num_bytes;
   }
   if (!has_username || !has_password) {
     LOG_ERROR("Missing username or password tag, failed registration!\n");
@@ -207,8 +204,10 @@ int parse_register_request(message_t *msg, registration_credentials_t *credentia
 int build_login_request(message_t *request, login_credentials_t *credentials) {
   request->version = 1;
   request->type = LOGIN;
-  request->flags = 0;
-  uint8_t *payload_start = (uint8_t *)request->payload;
+  request->rc = 0;
+
+  // Validate credentials
+  uint8_t *payload_start = request->data_buf + MSG_HEADER_SIZE;
   uint8_t **cursor = &payload_start;
   size_t username_len = strlen(credentials->username);
   size_t password_len = strlen(credentials->password);
@@ -222,33 +221,43 @@ int build_login_request(message_t *request, login_credentials_t *credentials) {
     return -1;
   }
 
+  // Write credenitals into our payload 
   write_tlv(cursor, TAG_USERNAME, username_len, credentials->username, 0);
   write_tlv(cursor, TAG_PASSWORD, password_len, credentials->password, 0);
-  uint32_t payload_len = (uint32_t)(*cursor-payload_start);
+  uint32_t payload_len = (uint32_t)(*cursor - payload_start);
   if (payload_len > MSG_MAX_PAYLOAD_SIZE) {
     LOG_ERROR("Payload of size %d bytes exceeds maximum of %d!\n", payload_len, MSG_MAX_PAYLOAD_SIZE);
     return -1;
   }
   request->payload_length = payload_len;
+  request->data_len = MSG_HEADER_SIZE + payload_len;
+
+  // Write header fields to message data buffer
+  request->data_buf[0] = request->version;
+  request->data_buf[1] = request->type;
+  request->data_buf[2] = request->rc;
+  uint32_t net_len = htonl(request->payload_length);
+  memcpy(&request->data_buf[3], &net_len, sizeof(uint32_t));
+
   return 0;
 }
 
 int parse_login_request(message_t *request, login_credentials_t *credentials) {
-  uint8_t *buf_ptr = (uint8_t *)request->payload;
-  uint8_t *end_ptr = buf_ptr + request->payload_length;
+  uint8_t *payload_ptr = request->data_buf + MSG_HEADER_SIZE;
+  uint8_t *payload_end = payload_ptr + request->payload_length;
   int has_username = 0;
   int has_password = 0;
-  while (buf_ptr < end_ptr) {
-    if (buf_ptr + 2 > end_ptr) {
+  while (payload_ptr < payload_end) {
+    if (payload_ptr + 2 > payload_end) {
       // Check if we have at least tag (1byte) + length (1byte).
       LOG_ERROR("Malformed TLV: incomplete header\n");
       return RESP_ERROR_MALFORMED;
     }
 
-    uint8_t tag = *buf_ptr++;
-    uint8_t num_bytes = *buf_ptr++;
+    uint8_t tag = *payload_ptr++;
+    uint8_t num_bytes = *payload_ptr++;
 
-    if (buf_ptr + num_bytes > end_ptr) {
+    if (payload_ptr + num_bytes > payload_end) {
       // Check to see if we have the full value from the TLV
       LOG_ERROR("Malformed TLV: incomplete value!\n");
       return RESP_ERROR_MALFORMED;
@@ -260,7 +269,7 @@ int parse_login_request(message_t *request, login_credentials_t *credentials) {
           LOG_ERROR("Username of length %d surpasses maximum username size %d!\n", num_bytes, MAX_USERNAME_SIZE);
           return RESP_ERROR_MALFORMED;
         }
-        memcpy(credentials->username, buf_ptr, num_bytes);
+        memcpy(credentials->username, payload_ptr, num_bytes);
         credentials->username[num_bytes] = '\0';
         has_username = 1;
         break;
@@ -269,14 +278,14 @@ int parse_login_request(message_t *request, login_credentials_t *credentials) {
           LOG_ERROR("Password of length %d surpasses maximum password size %d!\n", num_bytes, MAX_PASSWORD_SIZE);
           return RESP_ERROR_MALFORMED;
         }
-        memcpy(credentials->password, buf_ptr, num_bytes);
+        memcpy(credentials->password, payload_ptr, num_bytes);
         credentials->password[num_bytes] = '\0';
         has_password = 1;
         break;
       default:
         LOG_ERROR("Unknown TLV tag '%d', skipping %d bytes!\n", tag, num_bytes);
     }
-    buf_ptr += num_bytes;
+    payload_ptr += num_bytes;
   }
 
   if (!has_username || !has_password) {
@@ -289,43 +298,51 @@ int parse_login_request(message_t *request, login_credentials_t *credentials) {
 int build_world_broadcast(message_t *request, world_broadcast_t *broadcast) {
   request->version = 1;
   request->type = CHAT;
-  request->flags = 0;
-  uint8_t *payload_start = (uint8_t *)request->payload;
-  uint8_t **cursor = &payload_start;
+  request->rc = 0;
 
-  // Include broadcast type, sender, and content
+  // Write world broadcast's data into the message payload
+  uint8_t *payload_start = request->data_buf + MSG_HEADER_SIZE;
+  uint8_t **cursor = &payload_start;
   write_tlv(cursor, TAG_WORLD_BROADCAST, 0, NULL, 0); 
   write_tlv(cursor, TAG_SENDER_USERNAME, strlen(broadcast->sender_username), broadcast->sender_username, 0);
   write_tlv(cursor, TAG_MESSAGE_CONTENT, strlen(broadcast->message_content), broadcast->message_content, 0);
-
-  uint32_t payload_len = (uint32_t)(*cursor-payload_start);
+  uint32_t payload_len = (uint32_t)(*cursor - payload_start);
   if (payload_len > MSG_MAX_PAYLOAD_SIZE) {
-    printf("World Message Failed: Payload of size %d bytes exceeds maximum of %d!\n", payload_len, MSG_MAX_PAYLOAD_SIZE);
+    LOG_ERROR("World Message Failed: Payload of size %d bytes exceeds maximum of %d!\n", payload_len, MSG_MAX_PAYLOAD_SIZE);
     return -1;
   }
   request->payload_length = payload_len;
+
+  // Write header fields into the message's data buffer
+  request->data_buf[0] = request->version;
+  request->data_buf[1] = request->type;
+  request->data_buf[2] = request->rc;
+  uint32_t net_len = htonl(request->payload_length);
+  memcpy(&request->data_buf[3], &net_len, sizeof(uint32_t));
+  request->data_len = MSG_HEADER_SIZE + payload_len;
+
   return 0;
 }
 
 int parse_world_broadcast(message_t *msg, world_broadcast_t *broadcast) {
-  uint8_t *buf_ptr = (uint8_t *)msg->payload;
-  uint8_t *end_ptr = buf_ptr + msg->payload_length;
+  uint8_t *payload_ptr = msg->data_buf + MSG_HEADER_SIZE;
+  uint8_t *payload_end = payload_ptr + msg->payload_length;
   int has_broadcast_tag = 0;
   int has_sender = 0;
   int has_content = 0;
-  while (buf_ptr < end_ptr) {
-    if (buf_ptr + 2 > end_ptr) {
+  while (payload_ptr < payload_end) {
+    if (payload_ptr + 2 > payload_end) {
       // Check if we have at least tag (1byte) + length (1byte).
-      fprintf(stderr, "Malformed TLV: incomplete header\n");
+      LOG_ERROR("Malformed TLV: incomplete header\n");
       return RESP_ERROR_MALFORMED;
     }
 
-    uint8_t tag = *buf_ptr++;
-    uint8_t num_bytes = *buf_ptr++;
+    uint8_t tag = *payload_ptr++;
+    uint8_t num_bytes = *payload_ptr++;
 
-    if (buf_ptr + num_bytes > end_ptr) {
+    if (payload_ptr + num_bytes > payload_end) {
       // Check to see if we have the full value from the TLV
-      fprintf(stderr, "Malformed TLV: incomplete value!\n");
+      LOG_ERROR("Malformed TLV: incomplete value!\n");
       return RESP_ERROR_MALFORMED;
     }
 
@@ -335,19 +352,19 @@ int parse_world_broadcast(message_t *msg, world_broadcast_t *broadcast) {
         break;
       case TAG_SENDER_USERNAME:
         if (num_bytes > MAX_USERNAME_SIZE) {
-          fprintf(stderr, "Malformed TLV: username length exceeds limits!\n");
+          LOG_ERROR("Malformed TLV: username length exceeds limits!\n");
           return RESP_ERROR_MALFORMED;
         }
-        memcpy(broadcast->sender_username, buf_ptr, num_bytes);
+        memcpy(broadcast->sender_username, payload_ptr, num_bytes);
         broadcast->sender_username[num_bytes] = '\0';
         has_sender = 1;
         break;
       case TAG_MESSAGE_CONTENT:
         if (num_bytes > MAX_MSG_CONTENT_SIZE) {
-          fprintf(stderr, "Malformed TLV: message content length exceeds limits!\n");
+          LOG_ERROR("Malformed TLV: message content length exceeds limits!\n");
           return -1;
         }
-        memcpy(broadcast->message_content, buf_ptr, num_bytes);
+        memcpy(broadcast->message_content, payload_ptr, num_bytes);
         broadcast->message_content[num_bytes] = '\0';
         has_content = 1;
         break;
@@ -355,10 +372,10 @@ int parse_world_broadcast(message_t *msg, world_broadcast_t *broadcast) {
         // Unknown tag so skip it
         fprintf(stderr, "Unknown TLV tag '%d', skipping %d bytes\n", tag, num_bytes);
     }
-    buf_ptr += num_bytes;
+    payload_ptr += num_bytes;
   }
   if (!has_broadcast_tag || !has_sender || !has_content) {
-    fprintf(stderr, "Malformed request: broadcast, sender, or content tag missing from request payload!\n");
+    LOG_ERROR("Malformed request: broadcast, sender, or content tag missing from request payload!\n");
     return RESP_ERROR_MALFORMED;
   }
   return 0;
@@ -375,47 +392,61 @@ int parse_world_broadcast_notification(message_t *msg, world_broadcast_t *broadc
 int build_p2p_broadcast(message_t *request, p2p_broadcast_t *broadcast) {
   request->version = 1;
   request->type = CHAT;
-  request->flags = 0;
-  uint8_t *payload_start = (uint8_t *)request->payload;
+  request->rc = 0;
+  uint8_t *payload_start = request->data_buf + MSG_HEADER_SIZE;
   uint8_t **cursor = &payload_start;
 
+  // Validate usernames, write TLVs into payload buffer
+  if (strcmp(broadcast->sender_username, broadcast->recipient_username) == 0) {
+    LOG_ERROR("P2P Message Failed: Sender and Recipient username matched!\n");
+    return -1;
+  }
   write_tlv(cursor, TAG_P2P_BROADCAST, 0, NULL, 0); 
   write_tlv(cursor, TAG_SENDER_USERNAME, strlen(broadcast->sender_username), broadcast->sender_username, 0);
   write_tlv(cursor, TAG_RECIPIENT_USERNAME, strlen(broadcast->recipient_username), broadcast->recipient_username, 0);
   write_tlv(cursor, TAG_MESSAGE_CONTENT, strlen(broadcast->message_content), broadcast->message_content, 0);
-
-  uint32_t payload_len = (uint32_t)(*cursor-payload_start);
+  uint32_t payload_len = (uint32_t)(*cursor - payload_start);
   if (payload_len > MSG_MAX_PAYLOAD_SIZE) {
-    printf("World Message Failed: Payload of size %d bytes exceeds maximum of %d!\n", payload_len, MSG_MAX_PAYLOAD_SIZE);
+    LOG_ERROR("P2P Message Failed: Payload of size %d bytes exceeds maximum of %d!\n", payload_len, MSG_MAX_PAYLOAD_SIZE);
     return -1;
   }
   request->payload_length = payload_len;
+
+  // Write header to data buffer
+  request->data_buf[0] = request->version;
+  request->data_buf[1] = request->type;
+  request->data_buf[2] = request->rc;
+  uint32_t net_len = htonl(request->payload_length);
+  memcpy(&request->data_buf[3], &net_len, sizeof(uint32_t));
+  request->data_len = MSG_HEADER_SIZE + payload_len;
+
+  return 0;
 }
 
 int parse_p2p_broadcast(message_t *msg, p2p_broadcast_t *broadcast) {
-  uint8_t *buf_ptr = (uint8_t *)msg->payload;
-  uint8_t *end_ptr = buf_ptr + msg->payload_length;
+  uint8_t *payload_ptr = msg->data_buf + MSG_HEADER_SIZE;
+  uint8_t *payload_end = payload_ptr + msg->payload_length;
   int has_broadcast_tag = 0;
   int has_sender = 0;
   int has_recipient = 0;
   int has_content = 0;
 
-  while (buf_ptr < end_ptr) {
-    if (buf_ptr + 2 > end_ptr) {
+  while (payload_ptr < payload_end) {
+    if (payload_ptr + 2 > payload_end) {
       fprintf(stderr, "Malformed TLV: incomplete header\n");
       return RESP_ERROR_MALFORMED;
     }
 
-    uint8_t tag = *buf_ptr++;
-    uint8_t num_bytes = *buf_ptr++;
+    uint8_t tag = *payload_ptr++;
+    uint8_t num_bytes = *payload_ptr++;
 
-    if (buf_ptr + num_bytes > end_ptr) {
+    if (payload_ptr + num_bytes > payload_end) {
       fprintf(stderr, "Malformed TLV: incomplete value!\n");
       return RESP_ERROR_MALFORMED;
     }
 
     switch (tag) {
-      case TAG_WORLD_BROADCAST:
+      case TAG_P2P_BROADCAST:
         has_broadcast_tag = 1;
         break;
       case TAG_SENDER_USERNAME:
@@ -423,7 +454,7 @@ int parse_p2p_broadcast(message_t *msg, p2p_broadcast_t *broadcast) {
           fprintf(stderr, "Malformed TLV: sender username length exceeds limits!\n");
           return RESP_ERROR_MALFORMED;
         }
-        memcpy(broadcast->sender_username, buf_ptr, num_bytes);
+        memcpy(broadcast->sender_username, payload_ptr, num_bytes);
         broadcast->sender_username[num_bytes] = '\0';
         has_sender = 1;
         break;
@@ -432,7 +463,7 @@ int parse_p2p_broadcast(message_t *msg, p2p_broadcast_t *broadcast) {
           fprintf(stderr, "Malformed TLV: recipient username length exceeds limits!\n");
           return RESP_ERROR_MALFORMED;
         }
-        memcpy(broadcast->recipient_username, buf_ptr, num_bytes);
+        memcpy(broadcast->recipient_username, payload_ptr, num_bytes);
         broadcast->recipient_username[num_bytes] = '\0';
         has_recipient = 1;
         break;
@@ -441,7 +472,7 @@ int parse_p2p_broadcast(message_t *msg, p2p_broadcast_t *broadcast) {
           fprintf(stderr, "Malformed TLV: message content length exceeds limits!\n");
           return -1;
         }
-        memcpy(broadcast->message_content, buf_ptr, num_bytes);
+        memcpy(broadcast->message_content, payload_ptr, num_bytes);
         broadcast->message_content[num_bytes] = '\0';
         has_content = 1;
         break;
@@ -449,7 +480,7 @@ int parse_p2p_broadcast(message_t *msg, p2p_broadcast_t *broadcast) {
         // Unknown tag so skip it
         fprintf(stderr, "Unknown TLV tag '%d', skipping %d bytes\n", tag, num_bytes);
     }
-    buf_ptr += num_bytes;
+    payload_ptr += num_bytes;
   }
   if (!has_broadcast_tag || !has_sender || !has_recipient || !has_content) {
     fprintf(stderr, "Malformed request: broadcast, sender, recipient or content tag missing from request payload!\n");
@@ -463,11 +494,51 @@ int build_p2p_broadcast_notification(message_t *response, p2p_broadcast_t *broad
 }
 
 int parse_p2p_broadcast_notification(message_t *msg, p2p_broadcast_t *broadcast) {
-  return parse_world_broadcast(msg, broadcast);
+  return parse_p2p_broadcast(msg, broadcast);
 }
 
 int peek_broadcast_type(message_t *msg) {
-  uint8_t *buf_ptr = (uint8_t *)msg->payload;
-  tlv_tag_t tag = *buf_ptr;
+  uint8_t *buf_ptr = msg->data_buf + MSG_HEADER_SIZE;
+  tlv_tag_t tag = *buf_ptr; // Assumes the broadcast type is the first 1 byte tag we see in the payload
   return tag;
+}
+
+int build_server_response(message_t* response, response_code_t rc, uint8_t *data_buf, uint32_t buf_len) {
+  // Build Header fields
+  response->version = 1;
+  response->type = ACK;
+  response->rc = rc;
+
+  // Build Message Payload using data_buf; payload should be 
+  uint8_t *data_buf_end = data_buf + buf_len;
+  uint8_t *payload_start = response->data_buf + MSG_HEADER_SIZE;
+  uint8_t **cursor = &payload_start;
+  while (data_buf < data_buf_end) {
+    tlv_tag_t tag = *data_buf++;
+    uint8_t length = *data_buf++;
+    uint8_t value_buf[length];
+    memcpy(value_buf, data_buf, length);
+    data_buf += length;
+
+    // TODO: Figure out a way to encode the endianness of each TLV value in the data_buf.
+    write_tlv(cursor, tag, length, (const void*)value_buf, 0);
+  }
+
+  // verify and update payload length
+  uint32_t payload_len = (uint32_t)(*cursor - (response->data_buf + MSG_HEADER_SIZE));
+  response->payload_length = payload_len;
+  if (payload_len > MSG_MAX_PAYLOAD_SIZE) {
+    LOG_ERROR("Creating payload of size '%d', but maximum is '%d'\n", payload_len, MSG_MAX_PAYLOAD_SIZE);
+    return -1;
+  }
+
+  // Write header to data_buf
+  response->data_buf[0] = response->version;
+  response->data_buf[1] = response->type;
+  response->data_buf[2] = response->rc;
+  uint32_t net_len = htonl(response->payload_length);
+  memcpy(&response->data_buf[3], &net_len, sizeof(uint32_t));
+  response->data_len = MSG_HEADER_SIZE + payload_len;
+
+  return 0;
 }

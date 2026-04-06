@@ -1,27 +1,19 @@
 #include "shared.h"
 #include "server_utils.h"
+#include "protocol.h"
 
-const char* response_messages[] = {
-  [RESP_OK] = "Success",
-  [RESP_ERROR_MALFORMED] = "Malformed request",
-  [RESP_ERROR_USER_EXISTS] = "Username already taken",
-  [RESP_ERROR_USER_NOT_FOUND] = "User not found",
-  [RESP_ERROR_INVALID_CREDENTIALS] = "Invalid credentials",
-  [RESP_ERROR_INTERNAL] = "Internal server error",
-  [RESP_ERROR_UNKNOWN_COMMAND] = "Unknown command"
-};
-
-// Dynamically allocated array representing all connected clients on the TCP server.
-// This is indexed by connfd to make things a little easier.
+/*
+- conn_table: Dynamic array representing all connected clients
+- num_users: Represents number of users registered in the application, online and offline.
+- conn_table_mutex: Mutex that enforces mutual exclusion when updating the conn table.
+- user_file_path: Path to the CSV file that contains all registered user information.
+- user_file_mutex: Mutex that enforces mutual exclusion when updating the .csv.
+*/
+static Connections conn_table = {0};
 static uint64_t num_users = 0;
-static conn_t *conn_table = NULL;
-static uint32_t conn_table_capacity = 10;
-static uint32_t num_conns = 0;
 static pthread_mutex_t conn_table_mutex = PTHREAD_MUTEX_INITIALIZER;
 static const char* user_file_path = "./src/user_file_db.csv";
 static pthread_mutex_t user_file_mutex = PTHREAD_MUTEX_INITIALIZER;
-
-
 
 // -----------------------------------
 // Startup and Shutdown
@@ -32,10 +24,10 @@ int handle_shutdown(int SIGINT) {
   return 0;
 }
 
-
 // -----------------------------------
 // Database (file) API
 // -----------------------------------
+// TODO: May change this code so that we can connect to a container running postgres server
 
 /**
  * Loads the number of registers users in our app. 
@@ -176,52 +168,41 @@ int get_user_by_userID(uint32_t user_id, user_t *user) {
 }
 
 // -----------------------------------
-// Connection Table API
+// Connection Table API (Dynamic Array)
 // -----------------------------------
 
 /**
- * Initialies the dynamically allocated connection table.
- * 
- * NOTE: This should run at the start of the program.
- */
-void init_conn_table() {
-  conn_table = (conn_t *)malloc(sizeof(conn_t) * conn_table_capacity);
-  if (conn_table == NULL) {
-    fprintf(stderr, "Malloc failed on connection table: %s\n", strerror(errno));
-    exit(1);
-  }
-  for (uint32_t i = 0; i < conn_table_capacity; i++) {
-    conn_table[i].connfd = -1;
-    conn_table[i].user = NULL;
-    conn_table[i].ip_address = (struct sockaddr_storage){0};
-  }
-}
-
-/**
  * Adds a new connection to the connection table
- * @param new_conn A new connection object
+ * @param conn A new connection object
  * @return 0 on success, otherwise -1
  */
-int add_connection(conn_t *new_conn) {
+int add_connection(conn_t* conn) {
   pthread_mutex_lock(&conn_table_mutex);
-  if (new_conn->connfd > conn_table_capacity - 1) {
-    conn_table_capacity *= 2; 
-    conn_t* new_conn_table = realloc(conn_table, conn_table_capacity);
-    if (new_conn_table == NULL) {
-      fprintf(stderr, "add_connection failed: %s", strerror(errno));
+
+  // Handle resizing array
+  if (conn_table.count >= conn_table.capacity) {
+    int new_capacity = 0;
+    if (conn_table.capacity == 0) {
+      new_capacity = 10;
+    } else {
+      new_capacity = conn_table.capacity * 2;
+    }
+    conn_t* temp = realloc(conn_table.items, new_capacity * sizeof(*conn_table.items));
+    if (temp == NULL) {
+      LOG_ERROR("Failed to resize the array to new capacity '%d'!", new_capacity);
       return -1;
     }
-    conn_table = new_conn_table;
+    conn_table.items = temp;
+    conn_table.capacity = new_capacity;
   }
 
-  conn_table[new_conn->connfd] = (conn_t){
-    new_conn->ip_address,
-    new_conn->is_authenticated,
-    new_conn->connfd,
-    new_conn->user
+  // Write new connection into table and increase count
+  conn_table.items[conn->connfd] = (conn_t){
+    conn->addr,
+    conn->user,
+    conn->connfd
   };
-
-  num_conns += 1;
+  conn_table.count++;
   pthread_mutex_unlock(&conn_table_mutex);
   return 0;
 }
@@ -229,110 +210,41 @@ int add_connection(conn_t *new_conn) {
 /**
  * Removes a connection from the connection table
  * 
- * @param connfd The connection we want to remove
+ * @param connfd Fd for the descriptor we want to remove
+ * 
+ * NOTE: This essentially logs someone log of the application. We won't 
+ * just nullify and free the user pointer, but we'll clear all other fields.
  */
-int remove_connection(int connfd) {
+void remove_connection(int connfd) {
   pthread_mutex_lock(&conn_table_mutex);
-  conn_table[connfd].connfd = -1;
-  num_conns -= 1;  
+
+  // If authenticated, free malloced user and nullify to prevent dangling pointer
+  conn_t* conn = &conn_table.items[connfd];
+  if (conn->user) {
+    free(conn->user);
+    conn->user = NULL;
+  }
+
+  *conn = (conn_t){0};
+  conn_table.count--;
   pthread_mutex_unlock(&conn_table_mutex);  
-  return 0;
 }
 
 /**
- * Updates a connection object by populating it with user, representing it as authenticated.
+ * Authenticates a connection by making the user field point to a dynamically allocated user.
  * 
- * @param connfd Connection descriptor
- * @param user Pointer to a user struct
- * @return 0s
- * 
- * NOTE: 
- * - For a given connfd, only a single thread writes the slot.
- *   Potentially you've have another read thread it.
- * - Don't think i really need a mutex for thi?
+ * @param connfd Integer representing the client/user's socket connection descriptor.
+ * @param user Pointer to dynamically allocated memory for storing a user.
  */
-int update_conn_with_user(int connfd, user_t *user) {
-  conn_table[connfd].is_authenticated = 1;
-  conn_table[connfd].user = user;
-  return 0;
+void authenticate_connection(int connfd, user_t* user) {
+  pthread_mutex_lock(&conn_table_mutex);
+  conn_table.items[connfd].user = user;
+  pthread_mutex_unlock(&conn_table_mutex);  
 }
 
 // -----------------------------------
 // Application-Level Services e.g. Register, Login
 // -----------------------------------
-
-/**
- * Writes user credentials from message into buffers
- * 
- * @param msg Request message that we want to parse credentials from e.g., registration, logins, etc.
- * @param username Buffer to store the parsed username in.
- * @param password Buffer to store the parsed password in.
- * @return 0 on success, otherwise response code on failure.
- */
-int parse_credentials(message_t *msg, char *username, char *password) {
-  uint8_t* buf_ptr = (uint8_t *)msg->payload;
-  uint8_t* end_ptr = buf_ptr + msg->payload_length;
-  int has_username = 0;
-  int has_password = 0;
-
-  while (buf_ptr < end_ptr) {
-    if (buf_ptr + 2 > end_ptr) {
-      // Check if we have at least tag (1byte) + length (1byte).
-      fprintf(stderr, "Malformed TLV: incomplete header\n");
-      return RESP_ERROR_MALFORMED;
-    }
-    uint8_t tag = *buf_ptr++;
-    uint8_t length = *buf_ptr++;
-    if (buf_ptr + length > end_ptr) {
-      // Check to see if we have the full value
-      fprintf(stderr, "Malformed TLV: incomplete value!\n");
-      return RESP_ERROR_MALFORMED;
-    }
-    
-    switch(tag) {
-      case TAG_USERNAME:
-        if (has_username) {
-          fprintf(stderr, "Duplicate username field\n");
-          return RESP_ERROR_MALFORMED;
-        }
-        if (length < 1 || length > MAX_USERNAME_SIZE) {
-          fprintf(stderr, "Username length must be 1-%d characters\n", MAX_USERNAME_SIZE);
-          return RESP_ERROR_MALFORMED;
-        }
-        memcpy(username, buf_ptr, length); 
-        username[length] = '\0';
-        has_username = 1;
-        break;
-      case TAG_PASSWORD:
-        if (has_password) {
-          fprintf(stderr, "Duplicate password field\n");
-          return RESP_ERROR_MALFORMED;
-        }
-        if (length < 1 || length > MAX_PASSWORD_SIZE) {
-          fprintf(stderr, "Password length must be 1-%d characters\n", MAX_PASSWORD_SIZE);
-          return RESP_ERROR_MALFORMED;
-        }
-        memcpy(password, buf_ptr, length);
-        password[length] = '\0';
-        has_password = 1;
-        break;
-      default:
-        // Unknown tag - skip it (forward compatibility?)
-        fprintf(stderr, "Unknown TLV tag '%d', skipping %d bytes\n", tag, length);
-        break;
-    }
-
-    buf_ptr += length;
-  }
-
-  // Validate that both fields were sent
-  if (!has_username || !has_password) {
-    fprintf(stderr, "Missing required fields (username: %d, password %d)\n", has_username, has_password);
-    return RESP_ERROR_MALFORMED; 
-  }
-
-  return 0;
-}
 
 /**
  * Registers a user into the application
@@ -344,29 +256,31 @@ int parse_credentials(message_t *msg, char *username, char *password) {
  * @return 0 if success, otherwise an error response code.
  */
 int register_user(int connfd, message_t *msg, uint8_t* extra_data, uint32_t *extra_data_len) {
-  char username[MAX_USERNAME_SIZE+1] = {0};
-  char password[MAX_PASSWORD_SIZE+1] = {0};
-  int result = parse_credentials(msg, username, password);
-  if (result != 0) {
-    return result;
+  registration_credentials_t credentials = {0};
+  int rc = parse_register_request(msg, &credentials);
+  if (rc != 0) {
+    return rc;
   }
 
+  // If registered username isn't unique, reject request
   user_t user = {0};
-  result = get_user_by_username(username, &user);
-  if (result == 0) {
-    fprintf(stderr, "Username '%s' already taken!\n", username);
+  rc = get_user_by_username(credentials.username, &user);
+  if (rc == 0) {
+    fprintf(stderr, "Username '%s' already taken!\n", credentials.username);
     return RESP_ERROR_USER_EXISTS;
   }
-  
-  // Else, username is unique, so insert a user
+
+  // Attempt to insert user into our file
+  // NOTE: User has no ID yet, so set it to zero.
+  size_t username_len = strlen(credentials.username);
+  size_t password_len = strlen(credentials.password);
   user_t new_user = {0};
   new_user.id = 0; 
-  strncpy(new_user.username, username, MAX_USERNAME_SIZE);
-  new_user.username[MAX_USERNAME_SIZE] = '\0'; // Ensure null-termination
-  strncpy(new_user.password, password, MAX_PASSWORD_SIZE);
-  new_user.password[MAX_PASSWORD_SIZE] = '\0';
-
-  if (insert_user(&user) != 0) {
+  strncpy(new_user.username, credentials.username, username_len);
+  new_user.username[username_len] = '\0'; 
+  strncpy(new_user.password, credentials.password, password_len);
+  new_user.password[password_len] = '\0';
+  if (insert_user(&new_user) != 0) {
     return RESP_ERROR_INTERNAL;
   }
   return RESP_OK;
@@ -382,274 +296,110 @@ int register_user(int connfd, message_t *msg, uint8_t* extra_data, uint32_t *ext
  * @return 0 on success, otherwise a response code.
  */
 int login_user(int connfd, message_t *msg, uint8_t *extra_data, uint32_t *extra_data_len) {
-  char username[MAX_USERNAME_SIZE+1] = {0};
-  char password[MAX_PASSWORD_SIZE+1] = {0};
-  int result = parse_credentials(msg, username, password);
-  if (result != 0) {
-    return result;
+  login_credentials_t credentials = {0};
+  int rc = parse_login_request(msg, &credentials);
+  if (rc != 0) {
+    return rc;
   }
 
-  // Create connection structure; dynamic memory for conn_t has been
-  // allocated in connection table; here allocate memory for user_t
+  // Allocate memory for potentially new logged in user.
   user_t *user = (user_t *)malloc(sizeof(user_t));
   if (user == NULL) {
     fprintf(stderr, "malloc failed: %s\n", strerror(errno));
     return RESP_ERROR_INTERNAL;
   }
 
-  // TODO: Should probably update get_user_by_username to 
-  // differentiate between expected errors and user not found
-  if (get_user_by_username(username, user) != 0) {
+  // Does username exist in db?
+  if (get_user_by_username(credentials.username, user) != 0) {
     free(user);
-    fprintf(stderr, "User '%s' not found\n", username);
+    fprintf(stderr, "User with username '%s' not found\n", credentials.username);
     return RESP_ERROR_USER_NOT_FOUND;
   }
 
-  if (strcmp(user->password, password) != 0) {
+  // Does password match with existing user?
+  if (strcmp(user->password, credentials.password) != 0) {
     free(user);
-    fprintf(stderr, "Invalid password for user '%s'\n", username);  
+    fprintf(stderr, "Invalid password for user '%s'\n", credentials.username);  
     return RESP_ERROR_INVALID_CREDENTIALS;
   }
 
-  update_conn_with_user(connfd, user);
+  // Update/authenticate the user in the connection table
+  authenticate_connection(connfd, user);
 
-  // Write TLVs for userid, username, and password 
-  uint8_t **ptr = &extra_data;
-  write_tlv(ptr, TAG_USER_ID, sizeof(user->id), &user->id, 1);
-  write_tlv(ptr, TAG_USERNAME, strlen(user->username), user->username, 0);
-  write_tlv(ptr, TAG_PASSWORD, strlen(user->password), user->password, 0);
   return RESP_OK;
-}
-
-/**
- * Lists all desired users in the application.
- * @param connfd Descriptor associated with a connection socket.
- * @param msg Pointer to the request message.
- * @param extra_data Empty buffer that this function can use to add data to the response payload.
- * @param extra_data_len Amount of data (in bytes) that's copied into extra_data buffer, by this function.
- * @return 0 on success, otherwise -1.
- */
-int list_users(int connfd, message_t *msg, uint8_t *extra_data, uint32_t *extra_data_len) {
-  uint8_t* buf_ptr = (uint8_t *)msg->payload;
-  uint8_t* end_ptr = buf_ptr + msg->payload_length;
-  int option = -1;     // Either TAG_WORLD, TAG_USER_ID, or TAG_ROOM_ID. If 
-
-  uint32_t user_id;
-
-  while (buf_ptr < end_ptr) { 
-    if (buf_ptr + 2 > end_ptr) {
-      // Check if we have at least tag (1byte) + length (1byte).
-      fprintf(stderr, "Malformed TLV: incomplete header\n");
-      return RESP_ERROR_MALFORMED;
-    }
-
-    tlv_tag_t tag = *buf_ptr++;
-    uint8_t num_bytes = *buf_ptr++;
-    if (buf_ptr + num_bytes > end_ptr) {
-      // Check to see if we have the full value from the TLV
-      fprintf(stderr, "Malformed TLV: incomplete value!\n");
-      return RESP_ERROR_MALFORMED;
-    }
-
-    switch (tag) {
-      case TAG_WORLD:
-        // NOTE: TAG_WORLD will be of zero length, so no value.
-        option = tag;
-        break;
-      case TAG_USER_ID:
-        option = tag;
-
-        // NOTE: Typically the user_id will be represented in 1 byte, but when we do I/O multiplexing this 
-        // will grow to 2 and eventually 4 bytes to represent the user ID.
-        memcpy(&user_id, buf_ptr, num_bytes);
-        user_id = ntohl(user_id);
-        break;
-      default:
-        // Unknown tag - skip it (forward compatibility?)
-        fprintf(stderr, "Unknown TLV tag '%d', skipping %d bytes\n", tag, num_bytes);
-        break;
-    }
-    buf_ptr += num_bytes;
-  }
-
-  
-  // Return all authenticated users to the client
-  // TODO: You'll definitely run out of space for big lists of users
-  if (option == TAG_WORLD) {
-    uint8_t **buf_double_ptr = &extra_data;
-    for (int i = 0; i < num_conns; i++) {
-      if (conn_table[i].is_authenticated == 1) {
-        user_t *user = conn_table[i].user;
-        write_tlv(buf_double_ptr, TAG_USER_ID, sizeof(user->id), &user->id, 1);
-        write_tlv(buf_double_ptr, TAG_USERNAME, strlen(user->username), user->username, 0);
-        write_tlv(buf_double_ptr, TAG_PASSWORD, strlen(user->password), user->password, 0);
-      }
-    }
-    return RESP_OK;
-  } else if (option == TAG_USER_ID) {
-    user_t found_user = {0};
-    int result = get_user_by_userID(user_id, &found_user);
-    if (result == 0) {
-      return RESP_ERROR_USER_NOT_FOUND;
-    }
-
-    // Write user TLV into the extra_data buffer
-    uint8_t **buf_double_ptr = &extra_data;
-    write_tlv(buf_double_ptr, TAG_USER_ID, sizeof(found_user.id), &found_user.id, 1);
-    write_tlv(buf_double_ptr, TAG_USERNAME, strlen(found_user.username), found_user.username, 0);
-    write_tlv(buf_double_ptr, TAG_PASSWORD, strlen(found_user.password), found_user.password, 0);
-    return RESP_OK;
-  } else {
-    fprintf(stderr, "list_users failed: No context to list users from e.g., world, group, or a user ID\n");
-    return RESP_ERROR_MALFORMED;
-  }
 }
 
 /**
  * Handles sending a message to remote peers.
- * @param connfd Descriptor associated with a connection socket.
- * @param msg Pointer to the request message.
+ * @param connfd Socket descriptor associated with the TCP connection socket with the client sending this broadcast.
+ * @param msg Pointer to the request message containing the broadcast request.
  * @param extra_data Empty buffer that this function can use to add data to the response payload.
  * @param extra_data_len Amount of data (in bytes) that's copied into extra_data buffer, by this function.
- * @return 0 on success, otherwise -1.
+ * @return 0 on success, non-zero return code otherwise.
  */
-int send_message(int connfd, message_t *msg, uint8_t *extra_data, uint32_t *extra_data_len) {
-  uint8_t* buf_ptr = (uint8_t *)msg->payload;
-  uint8_t* end_ptr = buf_ptr + msg->payload_length;
-  
-  int option = -1; // TAG_WORLD, TAG_USER_ID, or TAG_ROOM_ID
-  uint32_t user_id;
-  uint8_t msg_content[MAX_MSG_CONTENT_SIZE];
-  uint8_t has_content = 0;
-  
-  while (buf_ptr < end_ptr) {
-    if (buf_ptr + 2 > end_ptr) {
-      // Check if we have at least tag (1byte) + length (1byte).
-      fprintf(stderr, "Malformed TLV: incomplete header\n");
-      return RESP_ERROR_MALFORMED;
-    }
-    uint8_t tag = *buf_ptr++;
-    uint8_t num_bytes = *buf_ptr++;
-    if (buf_ptr + num_bytes > end_ptr) {
-      // Check to see if we have the full value from the TLV
-      fprintf(stderr, "Malformed TLV: incomplete value!\n");
-      return RESP_ERROR_MALFORMED;
-    }
-    switch (tag) {
-      case TAG_WORLD:
-        if (option != -1) {
-          fprintf(stderr, "Messaging option already set to '%d', but encountered '%d'.\n", option, tag);
-          return RESP_ERROR_MALFORMED;
-        }
-        option = tag;
-        break;
-      case TAG_USER_ID:
-        if (option != -1) {
-          fprintf(stderr, "Messaging option already set to '%d', but encountered '%d'.\n", option, tag);
-          return RESP_ERROR_MALFORMED;
-        }
-        option = tag;
-        memcpy(&user_id, buf_ptr, num_bytes);
-        user_id = ntohl(user_id);
-        break;
-      case TAG_MESSAGE_CONTENT:
-        if (has_content == 1) {
-          fprintf(stderr, "Duplicate message content encountered!\n");
-          return RESP_ERROR_MALFORMED;
-        }
-        has_content = 1;
-        memcpy(msg_content, buf_ptr, num_bytes);
-        break;
-      default:
-        // Unknown tag - skip it (forward compatibility?)
-        fprintf(stderr, "Unknown TLV tag '%d', skipping %d bytes\n", tag, num_bytes);
-    }
-    buf_ptr += num_bytes;
+int handle_broadcast_message(int connfd, message_t *msg, uint8_t *extra_data, uint32_t *extra_data_len) {
+  int rc = peek_broadcast_type(msg);
+  if (rc == -1) {
+    return RESP_ERROR_INTERNAL;
   }
 
+  switch (rc) {
+    case TAG_WORLD_BROADCAST: {
+      world_broadcast_t broadcast = {0};
+      message_t response = {0};
+      rc = parse_world_broadcast(msg, &broadcast);
+      if (rc != 0) {
+        return RESP_ERROR_INTERNAL;
+      }
+      build_world_broadcast_notification(&response, &broadcast);
 
-  // TODO: Complete this implementation
-  // if (option == TAG_WORLD) {
-  //   // All auth. connections
-  // } else if (option == TAG_USER_ID) {
-  //   // To a specific user
-  // } else {
-  //   fprintf(stderr, "No message context set!\n");
-  //   return RESP_ERROR_MALFORMED;
-  // }
+      // Send response message to all authenticated users that aren't the sender
+      pthread_mutex_lock(&conn_table_mutex);
+      for (int i = 0; i < conn_table.capacity; i++) {
+        if (conn_table.items[i].user == NULL || i == connfd) {
+          continue;
+        }
+        write_one_message(i, &response);
+      }
+      pthread_mutex_unlock(&conn_table_mutex);
+      break;
+    }
+    case TAG_P2P_BROADCAST: {
+      p2p_broadcast_t broadcast = {0};
+      message_t response = {0};
+      rc = parse_p2p_broadcast(msg, &broadcast);
+      if (rc != 0) {
+        return RESP_ERROR_INTERNAL;
+      }
+      build_p2p_broadcast_notification(&response, &broadcast);
+
+      // Search for recipient connection
+      int recipient_connfd = -1;
+      pthread_mutex_lock(&conn_table_mutex);
+      for (int i = 0; i < conn_table.capacity; i++) {
+        conn_t conn = conn_table.items[i];
+        if (conn.user == NULL || i == connfd) {
+          continue;
+        }
+        if (strcmp(conn.user->username, broadcast.recipient_username) != 0) {
+          continue;
+        }
+        recipient_connfd = i;
+        break;
+      }
+      pthread_mutex_unlock(&conn_table_mutex);
+
+      if (recipient_connfd == -1) {
+        return RESP_ERROR_USER_NOT_FOUND;
+      }
+      write_one_message(recipient_connfd, &response);
+      break;
+    }
+    default:
+      fprintf(stderr, "Received unknown broadcast tag '%d'. Skipping request!\n", rc);
+  }
 
   return RESP_OK;
-}
-
-// ------------------------------------------
-// Request-Response, read/write network I/O handling
-// ------------------------------------------
-
-/**
- * Creates and populates a response message with response code and data.
- * 
- * @param msg Pointer to the message that we're sending as a response
- * @param rc Response code indicating the result of the user's request.
- * @param data_buf A pointer to a stream of TLVs that we have to insert into the payload. 
- * @param buf_len The length of data_buf in bytes.
- * @return 0 on successful creation, -1 otherwise
- * 
- * NOTE: This function has a couple of goals or responsibilities:
- * (1). Byte Order Handling: For multi-byte fields, this function will handle translating 
- * those fields into network-byte-order. 
- * (2). Byte Handling: It'll also be the main stage for constructing a response message, abstracting 
- *   away more complex or lower level ideas from our other business-related functions.
- */
-int create_response(message_t *msg, response_code_t rc, uint8_t *data_buf, uint32_t buf_len) {
-  
-  // ----- Build message header fields -----
-  msg->version = 1;
-  msg->type = ACK;
-  msg->flags = 42; // TODO: Placeholder for now
-
-  // ----- Build message payload -----
-  // 1. Write response code TLV
-  // 2. Write response message TLV
-  const char* response_message = response_messages[rc];
-  uint8_t msg_len = (uint8_t)strlen(response_message);
-  uint8_t *payload_start = (uint8_t *)msg->payload;
-  uint8_t **payload_double_ptr = &payload_start;
-  write_tlv(payload_double_ptr, TAG_RESPONSE_CODE, 1, &rc, 0);
-  write_tlv(payload_double_ptr, TAG_RESPONSE_MESSAGE, msg_len, response_message, 0);
-
-  // 3. Write response data (stream of TLVs) into our message payload
-  uint8_t *data_buf_ptr = data_buf;
-  uint8_t *data_buf_end = data_buf_ptr+buf_len;
-  while (data_buf_ptr < data_buf_end) {
-
-    // a. Read the tag (1 byte as always)
-    // b. Read the length of the TLV value, which is represented by 1 byte.
-    // c. Then read the value from the data buffer
-    tlv_tag_t tag = *data_buf_ptr;
-    data_buf_ptr++; 
-    uint8_t length = *data_buf_ptr;
-    data_buf_ptr++;
-    uint8_t value[length];
-    memcpy(value, data_buf, length);
-    data_buf_ptr += length;
-
-    // d. write TLV into the payload, represented by buf_double_ptr
-    // TODO: It's probably best to have the caller, or whoever created the data_buf functions handle 
-    // the endianness of these TLVs, the values in particular.
-    write_tlv(payload_double_ptr, tag, length, (const void*)value, 0);
-  }
-
-  // 4. After storing the payload update the payload_length
-  //  a. Read payload length into a temp buffer and convert the byte-sequence into network-byte-order
-  //  b. Write temp buffer into payload length
-  uint32_t payload_len = (uint32_t)(*payload_double_ptr - msg->payload);
-  uint32_t net_payload_len = htonl(payload_len);
-  memcpy(&msg->payload_length, &net_payload_len, sizeof(uint32_t));
-  if (payload_len > MSG_MAX_PAYLOAD_SIZE) {
-    fprintf(stderr, "create_response error: Creating payload of size '%d', but maximum is '%d'\n", payload_len, MSG_MAX_PAYLOAD_SIZE);
-    return -1;
-  }
-  return 0;
 }
 
 /**
@@ -659,17 +409,17 @@ int create_response(message_t *msg, response_code_t rc, uint8_t *data_buf, uint3
  * @return 0 on success, otherwise -1
  */
 int serve_one_message(int connfd) {
+
+  // 1. Read user request
   message_t request = {0};
   int read_result = read_one_message(connfd, &request);
   if (read_result == -1) {
     return -1; 
   }
 
-  // These are passed to service functions to get data (a stream of TLVs) from them and the size of it.
-  // NOTE: Can't use all of MSG_MAX_PAYLOAD_SIZE. Expect around 30 bytes for response message and response code tlvs
+  // 2. Serve request/handle the request
   uint8_t extra_data[MSG_MAX_PAYLOAD_SIZE] = {0};
   uint32_t extra_data_len = 0;
-
   int result;
   switch (request.type) {
     case REGISTER:
@@ -678,28 +428,28 @@ int serve_one_message(int connfd) {
     case LOGIN:
       result = login_user(connfd, &request, extra_data, &extra_data_len);
       break;
+    case CHAT:
+      result = handle_broadcast_message(connfd, &request, extra_data, &extra_data_len);
     default:
       fprintf(stderr, "Received unknown message type '%d'!\n", request.type);
       result = RESP_ERROR_UNKNOWN_COMMAND;
   }
 
+  // 3. Bulid server response/ACK for the client and write it over TCP
   message_t response;
-  result = create_response(&response, result, extra_data, extra_data_len);
-  if (result == -1) {
-    fprintf(stderr, "create_response failure!\n");
-  }
 
-  // d. Write it over TCP
-  int write_result = write_one_message(connfd, &response);
-  if (write_result == -1) {
-    fprintf(stderr, "write_one_message failed: %s\n", strerror(errno));
+  if (build_server_response(&response, result, extra_data, extra_data_len) != 0) {
+    return -1;
+  }
+  if (write_one_message(connfd, &response) == -1) {
+    LOG_ERROR("Error writing one message: %s\n", strerror(errno));
   }
 
   return 0;  
 }
 
 // ----------------------------------------------
-// Network Connection Stuff
+// Network Connection API
 // ----------------------------------------------
 int open_listenfd(char *port) {
   struct addrinfo hints, *listp, *p;
@@ -770,7 +520,6 @@ int open_listenfd(char *port) {
     return -1;
   }
 
-
   // Get the raw IP address (instead of hostname) and give port number as a string
   char host[1025];
   char service[32];
@@ -797,13 +546,16 @@ void *serve_connection(void *vargp) {
     close(connfd);
     return NULL;
   }
-  conn_t new_conn = {ip_address, 0, connfd, NULL};
+  conn_t new_conn = {ip_address, NULL, connfd};
   int result = add_connection(&new_conn);
   if (result == -1) {
     fprintf(stderr, "add_connection failure: closing '%d'!\n", connfd);
     close(connfd);
     return NULL;
   }
+
+
+  
 
   // 2. Infinite Connection Loop: Continue processing messages until disconnect or error
   while (serve_one_message(connfd) == 0) {}

@@ -4,21 +4,17 @@
 #define MSG_HEADER_SIZE 7 // max header size in bytes
 #define MSG_MAX_PAYLOAD_SIZE 4096 // max payload size in bytes
 
-/**
- * Struct representing a single message being transferred between client and server
- * 
- * - version: Application-layer protocol version.
- * - type: Type of request/message being sent.
- * - flags: Additional flags for special features, e.g., encryption
- * - payload_length: Size of the message payload.
- * - payload: A buffer containing the payload itself.
- */
-typedef struct _message {
-  uint32_t payload_length;
-  uint8_t payload[MSG_MAX_PAYLOAD_SIZE];
-  uint8_t version;
-  uint8_t type;
-  uint8_t flags;
+// Response messages corresponding with response codes 
+extern const char* response_messages[];
+
+// Struct representing a single message being transferred between client and server
+typedef struct {
+  uint8_t data_buf[MSG_HEADER_SIZE + MSG_MAX_PAYLOAD_SIZE]; // Full message buffer: header + payload
+  size_t data_len; // Total length of data in data_buf
+  uint8_t version; // Application-layer protocol version.
+  uint8_t type;    // Type of request/message being sent.
+  uint8_t rc;      // Response code, assuming type = ACK (the message represents a server response)
+  uint32_t payload_length; // Size of the message payload in host byte order.
 } message_t;
 
 /**
@@ -77,7 +73,7 @@ typedef struct {
 
 typedef struct {
   char sender_username[MAX_USERNAME_SIZE+1];
-  char message_content[MAX_MSG_CONTENT_SIZE];
+  char message_content[MAX_MSG_CONTENT_SIZE+1];
 } world_broadcast_t;
 
 typedef struct {
@@ -269,7 +265,32 @@ int parse_p2p_broadcast_notification(message_t *msg, p2p_broadcast_t *broadcast)
  * Given a request message for a chat, return the type of broadcast it wants to do.
  * 
  * @param msg The request message sent by the client, where message->type = CHAT. 
- * @return The tag value of the broadcast, otherwise -1 on error
+ * @return The tag value of the broadcast, otherwise -1 on error.
  * NOTE: Should be used by client and server.
  */
 int peek_broadcast_type(message_t *msg);
+
+/**
+ * Builds a server response message to be sent to a user, an ACK!
+ * 
+ * @param response Pointer to response message struct that this function will populate.
+ * @param rc Response code of the response.
+ * @param data_buf Pointer to the start of the buffer that contains data we'll fill the payload with.
+ * @param data_buf_len Length of the data_buf in bytes.
+ * 
+ * NOTE: For our TCP server, there'll be a couple types of messages that the server 
+ * sends back to the client. The most prominent will be the broadcast notification messages obviously, where 
+ * we're transmitting a sender's message across the wire to one or more remote recipients. The other type 
+ * of message that a server will send is an ACK, which tells the client that their request to do an action
+ * was successful! This function builds the ACK message! 
+ */
+int build_server_response(message_t* response, response_code_t rc, uint8_t *data_buf, uint32_t data_buf_len);
+
+
+/**
+ * Parses a server ACK message
+ * 
+ * TODO: May need to finish this
+ * NOTE: 'Updating it' may include turning fields into host byte order and parsing payload.
+ */
+int parse_server_response(message_t* server_response);
