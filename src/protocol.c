@@ -63,6 +63,8 @@ int read_one_message(int connfd, message_t* msg) {
     buf_ptr += bytes_read;
     bytes_to_read -= bytes_read;
   }
+
+  // Read header into our message buffer
   memcpy(msg->data_buf, header, MSG_HEADER_SIZE);
 
   // 2. Parse Header Fields into msg_t
@@ -102,11 +104,24 @@ int read_one_message(int connfd, message_t* msg) {
 
 int write_one_message(int connfd, message_t* response) { 
   // Send the data_buf directly, which contains header + payload in network byte order
-  int num_bytes_sent = send(connfd, response->data_buf, response->data_len, 0);
-  if (num_bytes_sent == -1) {
-    LOG_ERROR("Failed to write one message with errno '%s'\n", strerror(errno));
+
+  size_t bytes_sent = 0;
+  size_t bytes_to_send = response->payload_length+MSG_HEADER_SIZE;
+  while (bytes_sent < bytes_to_send) {
+    int res = send(connfd, (char*)response->data_buf+bytes_sent, bytes_to_send-bytes_sent, 0);
+    if (res <= 0) {
+      // If signal interruption, then continue looping
+      if (res < 0 && (errno == EINTR)) {
+        continue;
+      } else {
+        // Otherwise an actual error or connection closed
+        LOG_ERROR("Failed to write one message with errno '%s'\n", strerror(errno));
+        return -1;
+      }
+    }
+    bytes_sent += res;
   }
-  return num_bytes_sent;
+  return bytes_to_send;
 }
 
 int build_register_request(message_t *request, registration_credentials_t *credentials) {
@@ -116,7 +131,8 @@ int build_register_request(message_t *request, registration_credentials_t *crede
 
   // Validate credentials and write them into the payload of the data_buf
   uint8_t *payload_start = request->data_buf + MSG_HEADER_SIZE;
-  uint8_t **cursor = &payload_start;
+  uint8_t* moving_ptr = payload_start;
+
   size_t username_len = strlen(credentials->username);
   size_t password_len = strlen(credentials->password);
 
@@ -129,9 +145,9 @@ int build_register_request(message_t *request, registration_credentials_t *crede
     return -1;
   }
 
-  write_tlv(cursor, TAG_USERNAME, username_len, credentials->username, 0);
-  write_tlv(cursor, TAG_PASSWORD, password_len, credentials->password, 0);
-  uint32_t payload_len = (uint32_t)(*cursor - payload_start);
+  write_tlv(&moving_ptr, TAG_USERNAME, username_len, credentials->username, 0);
+  write_tlv(&moving_ptr, TAG_PASSWORD, password_len, credentials->password, 0);
+  uint32_t payload_len = (uint32_t)(moving_ptr - payload_start);
   if (payload_len > MSG_MAX_PAYLOAD_SIZE) {
     LOG_ERROR("Payload of size %d bytes exceeds maximum of %d!\n", payload_len, MSG_MAX_PAYLOAD_SIZE);
     return -1;
@@ -194,6 +210,7 @@ int parse_register_request(message_t *msg, registration_credentials_t *credentia
     }
     payload_ptr += num_bytes;
   }
+
   if (!has_username || !has_password) {
     LOG_ERROR("Missing username or password tag, failed registration!\n");
     return RESP_ERROR_MALFORMED;
@@ -208,7 +225,8 @@ int build_login_request(message_t *request, login_credentials_t *credentials) {
 
   // Validate credentials
   uint8_t *payload_start = request->data_buf + MSG_HEADER_SIZE;
-  uint8_t **cursor = &payload_start;
+  uint8_t* moving_ptr = payload_start;
+
   size_t username_len = strlen(credentials->username);
   size_t password_len = strlen(credentials->password);
 
@@ -222,9 +240,9 @@ int build_login_request(message_t *request, login_credentials_t *credentials) {
   }
 
   // Write credenitals into our payload 
-  write_tlv(cursor, TAG_USERNAME, username_len, credentials->username, 0);
-  write_tlv(cursor, TAG_PASSWORD, password_len, credentials->password, 0);
-  uint32_t payload_len = (uint32_t)(*cursor - payload_start);
+  write_tlv(&moving_ptr, TAG_USERNAME, username_len, credentials->username, 0);
+  write_tlv(&moving_ptr, TAG_PASSWORD, password_len, credentials->password, 0);
+  uint32_t payload_len = (uint32_t)(moving_ptr - payload_start);
   if (payload_len > MSG_MAX_PAYLOAD_SIZE) {
     LOG_ERROR("Payload of size %d bytes exceeds maximum of %d!\n", payload_len, MSG_MAX_PAYLOAD_SIZE);
     return -1;
@@ -238,7 +256,6 @@ int build_login_request(message_t *request, login_credentials_t *credentials) {
   request->data_buf[2] = request->rc;
   uint32_t net_len = htonl(request->payload_length);
   memcpy(&request->data_buf[3], &net_len, sizeof(uint32_t));
-
   return 0;
 }
 
@@ -302,11 +319,12 @@ int build_world_broadcast(message_t *request, world_broadcast_t *broadcast) {
 
   // Write world broadcast's data into the message payload
   uint8_t *payload_start = request->data_buf + MSG_HEADER_SIZE;
-  uint8_t **cursor = &payload_start;
-  write_tlv(cursor, TAG_WORLD_BROADCAST, 0, NULL, 0); 
-  write_tlv(cursor, TAG_SENDER_USERNAME, strlen(broadcast->sender_username), broadcast->sender_username, 0);
-  write_tlv(cursor, TAG_MESSAGE_CONTENT, strlen(broadcast->message_content), broadcast->message_content, 0);
-  uint32_t payload_len = (uint32_t)(*cursor - payload_start);
+  uint8_t *moving_ptr = payload_start;
+  
+  write_tlv(&moving_ptr, TAG_WORLD_BROADCAST, 0, NULL, 0); 
+  write_tlv(&moving_ptr, TAG_SENDER_USERNAME, strlen(broadcast->sender_username), broadcast->sender_username, 0);
+  write_tlv(&moving_ptr, TAG_MESSAGE_CONTENT, strlen(broadcast->message_content), broadcast->message_content, 0);
+  uint32_t payload_len = (uint32_t)(moving_ptr - payload_start);
   if (payload_len > MSG_MAX_PAYLOAD_SIZE) {
     LOG_ERROR("World Message Failed: Payload of size %d bytes exceeds maximum of %d!\n", payload_len, MSG_MAX_PAYLOAD_SIZE);
     return -1;
@@ -394,18 +412,18 @@ int build_p2p_broadcast(message_t *request, p2p_broadcast_t *broadcast) {
   request->type = CHAT;
   request->rc = 0;
   uint8_t *payload_start = request->data_buf + MSG_HEADER_SIZE;
-  uint8_t **cursor = &payload_start;
-
+  uint8_t *moving_ptr = payload_start;
+  
   // Validate usernames, write TLVs into payload buffer
   if (strcmp(broadcast->sender_username, broadcast->recipient_username) == 0) {
     LOG_ERROR("P2P Message Failed: Sender and Recipient username matched!\n");
     return -1;
   }
-  write_tlv(cursor, TAG_P2P_BROADCAST, 0, NULL, 0); 
-  write_tlv(cursor, TAG_SENDER_USERNAME, strlen(broadcast->sender_username), broadcast->sender_username, 0);
-  write_tlv(cursor, TAG_RECIPIENT_USERNAME, strlen(broadcast->recipient_username), broadcast->recipient_username, 0);
-  write_tlv(cursor, TAG_MESSAGE_CONTENT, strlen(broadcast->message_content), broadcast->message_content, 0);
-  uint32_t payload_len = (uint32_t)(*cursor - payload_start);
+  write_tlv(&moving_ptr, TAG_P2P_BROADCAST, 0, NULL, 0); 
+  write_tlv(&moving_ptr, TAG_SENDER_USERNAME, strlen(broadcast->sender_username), broadcast->sender_username, 0);
+  write_tlv(&moving_ptr, TAG_RECIPIENT_USERNAME, strlen(broadcast->recipient_username), broadcast->recipient_username, 0);
+  write_tlv(&moving_ptr, TAG_MESSAGE_CONTENT, strlen(broadcast->message_content), broadcast->message_content, 0);
+  uint32_t payload_len = (uint32_t)(moving_ptr - payload_start);
   if (payload_len > MSG_MAX_PAYLOAD_SIZE) {
     LOG_ERROR("P2P Message Failed: Payload of size %d bytes exceeds maximum of %d!\n", payload_len, MSG_MAX_PAYLOAD_SIZE);
     return -1;
@@ -512,7 +530,8 @@ int build_server_response(message_t* response, response_code_t rc, uint8_t *data
   // Build Message Payload using data_buf; payload should be 
   uint8_t *data_buf_end = data_buf + buf_len;
   uint8_t *payload_start = response->data_buf + MSG_HEADER_SIZE;
-  uint8_t **cursor = &payload_start;
+  uint8_t* moving_ptr = payload_start;
+
   while (data_buf < data_buf_end) {
     tlv_tag_t tag = *data_buf++;
     uint8_t length = *data_buf++;
@@ -521,11 +540,11 @@ int build_server_response(message_t* response, response_code_t rc, uint8_t *data
     data_buf += length;
 
     // TODO: Figure out a way to encode the endianness of each TLV value in the data_buf.
-    write_tlv(cursor, tag, length, (const void*)value_buf, 0);
+    write_tlv(&moving_ptr, tag, length, (const void*)value_buf, 0);
   }
 
   // verify and update payload length
-  uint32_t payload_len = (uint32_t)(*cursor - (response->data_buf + MSG_HEADER_SIZE));
+  uint32_t payload_len = (uint32_t)(moving_ptr - payload_start);
   response->payload_length = payload_len;
   if (payload_len > MSG_MAX_PAYLOAD_SIZE) {
     LOG_ERROR("Creating payload of size '%d', but maximum is '%d'\n", payload_len, MSG_MAX_PAYLOAD_SIZE);

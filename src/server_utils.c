@@ -1,171 +1,15 @@
 #include "shared.h"
 #include "server_utils.h"
 #include "protocol.h"
+#include "db.h"
 
 /*
 - conn_table: Dynamic array representing all connected clients
 - num_users: Represents number of users registered in the application, online and offline.
 - conn_table_mutex: Mutex that enforces mutual exclusion when updating the conn table.
-- user_file_path: Path to the CSV file that contains all registered user information.
-- user_file_mutex: Mutex that enforces mutual exclusion when updating the .csv.
 */
 static Connections conn_table = {0};
-static uint64_t num_users = 0;
 static pthread_mutex_t conn_table_mutex = PTHREAD_MUTEX_INITIALIZER;
-static const char* user_file_path = "./src/user_file_db.csv";
-static pthread_mutex_t user_file_mutex = PTHREAD_MUTEX_INITIALIZER;
-
-// -----------------------------------
-// Startup and Shutdown
-// -----------------------------------
-
-// TODO: Handle clean shutdown
-int handle_shutdown(int SIGINT) {
-  return 0;
-}
-
-// -----------------------------------
-// Database (file) API
-// -----------------------------------
-// TODO: May change this code so that we can connect to a container running postgres server
-
-/**
- * Loads the number of registers users in our app. 
- * 
- * NOTE: This doesn't use a mutex because we're assuming that this is called
- * there are other threads attempting to write the user file and num_users.
- */
-void init_user_file_state() {
-  // 1. Create file if it doesn't exist.
-  FILE* fp = fopen(user_file_path, (const char *)'r');
-  if (fp == NULL) {
-    num_users = 0;
-    return;
-  }
-
-  // 2. Get the number of users based on the IDs
-  // NOTE: This assumes no one gets deleted.
-  char line[512];
-  uint32_t last_id = 0;
-  while (fgets(line, sizeof(line), fp)) {
-    uint32_t current_id;
-    // We only care about the first column (the ID)
-    if (sscanf(line, "%u,", &current_id) == 1) {
-      if (current_id > last_id) {
-       last_id = current_id;
-      }
-    }
-  }
-  num_users = last_id;
-  fclose(fp);
-  printf("Server init: %lu users loaded.\n", num_users);
-}
-
-/**
- * Inserts a new user into the database
- * @param user New user to write into the database
- * @return 0 if success, otherwise -1.
- * 
- * NOTE: This function is thread-safe as we use a mutex to lock access to the underlying file.
- */
-int insert_user(user_t* user) {
-  pthread_mutex_lock(&user_file_mutex);
-  FILE* fp = fopen(user_file_path, (const char *)'a');
-  if (fp == NULL) {
-    pthread_mutex_unlock(&user_file_mutex);
-    fprintf(stderr, "insert_user error: %s\n", strerror(errno));
-    return -1;
-  }
-
-  /*
-  ATTENTION:
-  1. user_file_mutex is used with num_users. No other locations write 
-    num_users for data integrity.
-  2. No other places  updating user->id. During registration, other threads 
-    should be reading user->id as the user itself is still being created. Meaning it 
-    won't show up for other clients to read or something.
-  */
-  fprintf(fp, "%u,%s,%s\n", user->id, user->username, user->password);
-  fclose(fp);
-  num_users += 1;
-  user->id = num_users;
-  pthread_mutex_unlock(&user_file_mutex);
-  return 0;
-}
-
-/**
- * Populates a user_t pointer with user data from the database
- * 
- * @param username Unique username of the user we're fetching.
- * @param user Pointer to the user_t struct that we're populating data with.
- * @return 0 on success (user found), otherwise -1 (user not found).
- */
-int get_user_by_username(char* username, user_t *user) {
-  pthread_mutex_lock(&user_file_mutex);
-  FILE* fp = fopen(user_file_path, (const char*)'r');
-  if (fp == NULL) {
-    pthread_mutex_unlock(&user_file_mutex);
-    return -1; 
-  } 
-  char line[512]; 
-  int found = 0;
-  while (fgets(line, sizeof(line), fp)) {
-    unsigned int id;
-    char current_username[MAX_USERNAME_SIZE+1];
-    char current_password[MAX_PASSWORD_SIZE+1];
-
-    // Scan for unsigned int, string, and string.
-    // If found, update boolean, and populate struct with data.
-    if (sscanf(line, "%u,%s,%s", &id, current_username, current_password) == 3) {
-      if (strcmp(current_username, username) == 0) {
-        found = 1;
-        user->id = id;
-        strcpy(user->username, (const char *)current_username);
-        strcpy(user->password, (const char *)current_password);
-        break;
-      }
-    }
-  }
-  fclose(fp);
-  pthread_mutex_unlock(&user_file_mutex);
-  return found;
-}
-
-/**
- * Populates a user_t pointer with user data from the database.
- * 
- * @param user_id The ID of the user in the database.
- * @param user Struct pointer that we'll populate with the user information as long as user is found.
- * @return 1 if user is found, otherwise 0.
- */
-int get_user_by_userID(uint32_t user_id, user_t *user) {
-    pthread_mutex_lock(&user_file_mutex);
-    FILE* fp = fopen(user_file_path, (const char*)'r');
-    if (fp == NULL) {
-      pthread_mutex_unlock(&user_file_mutex);
-      return -1; 
-    } 
-
-    char line[512]; 
-    int found = 0;
-    while (fgets(line, sizeof(line), fp)) {
-      uint32_t id;
-      char current_username[MAX_USERNAME_SIZE+1];
-      char current_password[MAX_PASSWORD_SIZE+1];
-      if (sscanf(line, "%u,%s,%s", &id, current_username, current_password) == 3) {
-        if (id == user_id) {
-          found = 1;
-          user->id = id;
-          strcpy(user->username, (const char *)current_username);
-          strcpy(user->password, (const char *)current_password);
-          break;
-        }
-      }
-    }
-
-    pthread_mutex_unlock(&user_file_mutex);
-    return found;
-}
 
 // -----------------------------------
 // Connection Table API (Dynamic Array)
@@ -265,22 +109,22 @@ int register_user(int connfd, message_t *msg, uint8_t* extra_data, uint32_t *ext
   // If registered username isn't unique, reject request
   user_t user = {0};
   rc = get_user_by_username(credentials.username, &user);
-  if (rc == 0) {
+  if (rc == 1) {
     fprintf(stderr, "Username '%s' already taken!\n", credentials.username);
     return RESP_ERROR_USER_EXISTS;
   }
+  if (rc == -1) {
+    LOG_ERROR("get_user_by_username Failed!\n");
+    return RESP_ERROR_INTERNAL;
+  }
 
-  // Attempt to insert user into our file
-  // NOTE: User has no ID yet, so set it to zero.
-  size_t username_len = strlen(credentials.username);
-  size_t password_len = strlen(credentials.password);
   user_t new_user = {0};
   new_user.id = 0; 
-  strncpy(new_user.username, credentials.username, username_len);
-  new_user.username[username_len] = '\0'; 
-  strncpy(new_user.password, credentials.password, password_len);
-  new_user.password[password_len] = '\0';
+  strcpy(new_user.username, credentials.username);
+  strcpy(new_user.password, credentials.password);
+
   if (insert_user(&new_user) != 0) {
+    LOG_ERROR("insert_user Failure!\n");
     return RESP_ERROR_INTERNAL;
   }
   return RESP_OK;
@@ -310,10 +154,16 @@ int login_user(int connfd, message_t *msg, uint8_t *extra_data, uint32_t *extra_
   }
 
   // Does username exist in db?
-  if (get_user_by_username(credentials.username, user) != 0) {
+  rc = get_user_by_username(credentials.username, user);
+  if (rc != 1) {
     free(user);
-    fprintf(stderr, "User with username '%s' not found\n", credentials.username);
-    return RESP_ERROR_USER_NOT_FOUND;
+    if (rc == 0) {
+      fprintf(stdout, "User with username '%s' not found\n", credentials.username);
+      return RESP_ERROR_USER_NOT_FOUND;
+    } else {
+      LOG_ERROR("get_user_by_username() Failed!\n");
+      return RESP_ERROR_INTERNAL;
+    }
   }
 
   // Does password match with existing user?
@@ -430,6 +280,7 @@ int serve_one_message(int connfd) {
       break;
     case CHAT:
       result = handle_broadcast_message(connfd, &request, extra_data, &extra_data_len);
+      break;
     default:
       fprintf(stderr, "Received unknown message type '%d'!\n", request.type);
       result = RESP_ERROR_UNKNOWN_COMMAND;
@@ -451,6 +302,13 @@ int serve_one_message(int connfd) {
 // ----------------------------------------------
 // Network Connection API
 // ----------------------------------------------
+
+/**
+ * Opens a listening socket at the given port
+ * 
+ * @param port Port number that we're launching the server at.
+ * @return The fd of the listening socket we've opened. Otherwise -1 on error.
+ */
 int open_listenfd(char *port) {
   struct addrinfo hints, *listp, *p;
   int listenfd, return_code, optval = 1;
@@ -533,6 +391,14 @@ int open_listenfd(char *port) {
   return listenfd;
 }
 
+int init_server(char* port) {  
+  int rc = init_db();
+  if (rc == -1) {
+    return -1;
+  }
+  return open_listenfd(port);
+}
+
 void *serve_connection(void *vargp) {
   int connfd = *((int*)vargp);
   pthread_detach(pthread_self());
@@ -554,10 +420,8 @@ void *serve_connection(void *vargp) {
     return NULL;
   }
 
-
-  
-
-  // 2. Infinite Connection Loop: Continue processing messages until disconnect or error
+  // 2. Infinite Connection Loop: Continue processing messages
+  // that are valid.
   while (serve_one_message(connfd) == 0) {}
 
   // 3. Connection Closure

@@ -12,13 +12,21 @@
  */
 int handle_client_registration(int clientfd) {
   registration_credentials_t credentials = {0};
-  char username_prompt[50];
-  char password_prompt[50];
-  snprintf(username_prompt, sizeof(username_prompt), "Enter a username (max %d characters): ", MAX_USERNAME_SIZE);
-  snprintf(password_prompt, sizeof(password_prompt), "Enter a password (max %d characters): ", MAX_PASSWORD_SIZE);
-  get_stdin(username_prompt, credentials.username, sizeof(credentials.username));
-  get_stdin(password_prompt, credentials.password, sizeof(credentials.password));
-  
+
+  printf("Enter a username: ");
+  if (fgets(credentials.username, sizeof(credentials.username), stdin) == NULL) {
+    fprintf(stderr, "Error reading username\n");
+    return -1;
+  }
+  credentials.username[strcspn(credentials.username, "\n")] = '\0';  // Remove newline
+
+  printf("Enter a password: ");
+  if (fgets(credentials.password, sizeof(credentials.password), stdin) == NULL) {
+    fprintf(stderr, "Error reading password\n");
+    return -1;
+  }
+  credentials.password[strcspn(credentials.password, "\n")] = '\0';  // Remove newline
+
   // 1. Create request message
   message_t request_message = {0};
   if (build_register_request(&request_message, &credentials) == -1) {
@@ -37,8 +45,6 @@ int handle_client_registration(int clientfd) {
   }
 
   printf("Server Response (code=%d): %s\n", response.rc, response_messages[response.rc]);
-
-  // TODO: The payload could be used to add extra details of the error or success
   return 0;
 }
 
@@ -50,13 +56,21 @@ int handle_client_registration(int clientfd) {
  */
 int handle_client_login(int clientfd, user_t *user) {
   login_credentials_t credentials = {0};
-  char username_prompt[50];
-  char password_prompt[50];
-  snprintf(username_prompt, sizeof(username_prompt), "Enter your username (max %d characters): ", MAX_USERNAME_SIZE);
-  snprintf(password_prompt, sizeof(password_prompt), "Enter your password (max %d characters): ", MAX_PASSWORD_SIZE);
-  get_stdin(username_prompt, credentials.username, sizeof(credentials.username));
-  get_stdin(password_prompt, credentials.password, sizeof(credentials.password));
 
+  printf("Username: ");
+  if (fgets(credentials.username, sizeof(credentials.username), stdin) == NULL) {
+    fprintf(stderr, "Error reading username\n");
+    return -1;
+  }
+  credentials.username[strcspn(credentials.username, "\n")] = '\0';
+
+  printf("Password: ");
+  if (fgets(credentials.password, sizeof(credentials.password), stdin) == NULL) {
+    fprintf(stderr, "Error reading password\n");
+    return -1;
+  }
+  credentials.password[strcspn(credentials.password, "\n")] = '\0';
+  
   // 1. Create request message and send it across the wire
   message_t request = {0};
   if (build_login_request(&request, &credentials) != 0) {
@@ -66,23 +80,18 @@ int handle_client_login(int clientfd, user_t *user) {
     return -1;
   } 
 
-  // 2. Read response from server to see if things worked
+  // 2. Read and parse server response
   message_t response = {0};
   if (read_one_message(clientfd, &response) == -1) {
     return -1;
   }
-
-  // 3. Parse response
   if (response.rc != RESP_OK) {
     printf("Login Failed (code=%d): %s\n", response.rc, response_messages[response.rc]);
     return -1;
   }
 
-  // Populate user struct
   strcpy(user->username, credentials.username);
-  user->id = 0; // TODO: Parse from response if server sends it
-
-  printf("Now authenticated as '%s'!\n", credentials.username);
+  printf("Login successful: Now joined as '%s'!\n", credentials.username);
   return 0;
 }
 
@@ -95,16 +104,18 @@ int handle_client_login(int clientfd, user_t *user) {
 void handle_world_message(int clientfd, user_t *user, char* message_content) {
   // 1. Build world broadcast request message
   world_broadcast_t broadcast = {0};
-  strcpy(&broadcast.sender_username, &user->username);
-  strcpy(&broadcast.message_content, &message_content);
+  strcpy(broadcast.sender_username, user->username);
+  strcpy(broadcast.message_content, message_content);
   message_t request = {0};
   if (build_world_broadcast(&request, &broadcast) != 0) {
-    return -1;
+    printf("Client Failure: Failed to build world broadcast!\n");
+    return;
   }
 
   // 2. Send world broadcast message over TCP
-  if (write_one_message(clientfd, &request) != 0) {
-    return -1;
+  if (write_one_message(clientfd, &request) == -1) {
+    printf("Client Failure: Failed to write world broadcast!\n");
+    return;
   }
 
   // 3. Read response message from the server
@@ -112,14 +123,14 @@ void handle_world_message(int clientfd, user_t *user, char* message_content) {
   // b. Otherwise, output message indicating user's message was broadcasted
   message_t response = {0};
   if (read_one_message(clientfd, &response) != 0) {
-    return -1;
+    printf("Client Failure: Failed to read server response message.\n");
+    return;
   }
   if (response.rc != 0) {
-    printf("Server Failure (code=%d): Your message wasn't broadcasted.\n");
-    return -1;
+    printf("Server Failure: Your message wasn't broadcasted.\n");
+    return;
   }
   printf("%s> %s\n", user->username, broadcast.message_content);
-  return 0;
 }
 
 /**
@@ -132,28 +143,31 @@ void handle_world_message(int clientfd, user_t *user, char* message_content) {
 void handle_peer_message(int clientfd, user_t* user, char* recipient_username, char* message_content) {
   // 1. Create world broadcast request and send it over the wire
   p2p_broadcast_t broadcast = {0};
-  strcpy(&broadcast.sender_username, &user->username);
-  strcpy(&broadcast.recipient_username, recipient_username);
-  strcpy(&broadcast.message_content, message_content);
+  strcpy(broadcast.sender_username, user->username);
+  strcpy(broadcast.recipient_username, recipient_username);
+  strcpy(broadcast.message_content, message_content);
   message_t request = {0};
   if (build_p2p_broadcast(&request, &broadcast) != 0) {
-    return -1;
+    printf("Client Failure: Failed to build P2P broadcast!\n");
+    return;
   }
-  if (write_one_message(clientfd, &request) != 0) {
-    return -1;
+  if (write_one_message(clientfd, &request) == -1) {
+    printf("Client Failure: Failed to write P2P broadcast!\n");
+    return;
   }
   
   // 2. Read response from the server
   message_t response = {0};
   if (read_one_message(clientfd, &response) != 0) {
-    return -1;
+    printf("Client Failure: Failed to read server response!\n");
+    return;
   }
 
   // 3. Output results to the client
   if (response.rc == 0) {
     printf("%s to %s> %s\n", user->username, recipient_username, message_content);
   } else {
-    printf("Server Failure (code=%d): P2P message wasn't sent!\n");
+    printf("Server Failure (code=%d): P2P message was sent, but not broadcasted! Extra details: %s\n", response.rc, response_messages[response.rc]);
   }
 }
 
@@ -192,7 +206,6 @@ void handle_broadcast_notification(int clientfd) {
   }
 }
 
-
 // ---------------------------
 // Client Loop and user input
 // ---------------------------
@@ -200,7 +213,7 @@ void handle_broadcast_notification(int clientfd) {
 void shell(int clientfd, user_t* user) {
   char prompt[100] = {0};
   char command_buffer[10 + MAX_USERNAME_SIZE + MAX_MSG_CONTENT_SIZE + 1]; // Enough for "/<command>, where command=world or p2p" and additional args
-  
+
   // Prompt string uses the authenticated user's username
   snprintf(prompt, sizeof(prompt), "%s> ", user->username);
   get_stdin(prompt, command_buffer, sizeof(command_buffer));
@@ -230,7 +243,6 @@ void shell(int clientfd, user_t* user) {
   }  
 }
 
-
 /**
  * Runs an event loop for the client
  * 
@@ -238,18 +250,22 @@ void shell(int clientfd, user_t* user) {
  */
 void run_messaging_loop(int clientfd, user_t* user) {
   struct pollfd fds[2];
-  fds[0].fd = STDIN_FILENO;
-  fds[0].events = POLLIN;
-  fds[1].fd = clientfd;
-  fds[1].events = POLLIN;
+  
   while (1) {
-    int ret = poll(fds, (nfds_t)sizeof(fds), -1);
+    // Step 1: Prepare poll args for stdin and tcp connection (read and any errors)
+    // a. Clear existing structs (since they've been modified by prev loop)
+    // b. Create new structs that are listening for read and error events
+    memset(fds, 0, sizeof(fds));
+    fds[0].fd = STDIN_FILENO;
+    fds[0].events = POLLIN | POLLERR;
+    fds[1].fd = clientfd;
+    fds[1].events = POLLIN | POLLERR;
+    nfds_t nfds = sizeof(fds) / sizeof(fds[0]);
+    int ret = poll(fds, nfds, -1);
     if (ret == -1) {
-      fprintf(stderr, "Poll Error: %s\n", strerror(errno));
-      break;
+      fprintf(stderr, "Poll Error (Shutting down app): %s\n", strerror(errno));
+      exit(0);
     }
-
-    // TODO: How 
 
     // Check if the server sent something
     if (fds[1].revents & POLLIN) {
@@ -294,6 +310,7 @@ int create_client_connection(char* ip, short port) {
   if (conn_result == -1) {
     close(fd);
     fprintf(stderr, "connect() failed: '%s'!\n", strerror(errno));
+    return -1;
   }
   
   return fd;

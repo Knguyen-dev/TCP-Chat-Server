@@ -2,12 +2,11 @@
 #define SERVER_UTILS_H
 
 /**
- * Opens a listening socket at the given port
- * 
- * @param port Port number that we're launching the server at.
- * @return The fd of the listening socket we've opened. Otherwise -1 on error.
+ * Initializes and starts the server at some port 
+ * @param port Port number that we're starting the server on.
+ * @return Descriptor for the server's listening socket on success, otherwise -1 on error.
  */
-int open_listenfd(char *port);
+int init_server(char* port);
 
 /**
  * Thread routine that has an infinite server loop.

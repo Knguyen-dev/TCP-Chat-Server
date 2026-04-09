@@ -22,6 +22,17 @@ void private_log_logic(const char* func_name, int line, const char* format, ...)
     fprintf(stderr, "\n");
 }
 
+void log_message(const char *prefix, const char *msg) {
+    FILE *f = fopen("chat_server.log", "a");
+    if (f == NULL) return;
+    time_t now;
+    time(&now);
+    char *date = ctime(&now);
+    date[strlen(date) - 1] = '\0'; // Remove newline
+    fprintf(f, "[%s] %s: %s\n", date, prefix, msg);
+    fclose(f);
+}
+
 int get_valid_input_range(char *prompt, int min, int max) {
   int value;
   int status;

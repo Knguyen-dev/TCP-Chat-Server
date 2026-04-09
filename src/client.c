@@ -16,13 +16,10 @@ void sigint_handler(int sigint) {
 
 
 int main(void) {
-  char input_ip[16];
+  char input_ip[16] = "0.0.0.0";
   short port = 8080;
   user_t user = {0}; 
   signal(SIGINT, sigint_handler);
-
-  get_stdin("Enter the IP address of the chat server: ", input_ip, sizeof(input_ip));
-  port = (short)get_valid_input_range("Enter the port number: ", 0, 65535);
 
   clientfd = create_client_connection(input_ip, port);
   if (clientfd == -1) {
@@ -35,6 +32,7 @@ int main(void) {
   int continue_loop = 1;
   while (continue_loop) {
     int choice = get_valid_input_range("1. Create Account\n2. Contine with existing account\n3. Quit\nEnter your choice: ", 1, 3);
+    while (getchar() != '\n');
     switch (choice) {
       case 1:
         handle_client_registration(clientfd);
@@ -56,7 +54,6 @@ int main(void) {
   // At this point they've been authenticated
   // Start the messaging loop
   run_messaging_loop(clientfd, &user);
-
-  printf("Thanks for using TCP Chat!\n");
+  
   return 0;
 }
