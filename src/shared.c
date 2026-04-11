@@ -72,3 +72,11 @@ void get_stdin(char *prompt, char *buffer, int buf_size) {
     exit(-1);
   }
 }
+
+void string_to_lower(char* str) {
+  int i = 0;
+  while (str[i] != '\0') {
+    str[i] = tolower((unsigned char)str[i]);
+    i += 1;
+  }
+}

@@ -245,9 +245,11 @@ void shell(int clientfd, user_t* user) {
   if (command == NULL) {
     return;
   }
+  string_to_lower(command);
 
   if (strcmp(command, "/p2p") == 0) {
     char* recipient_username = strtok(NULL, " ");
+    string_to_lower(recipient_username);
     char* message = strtok(NULL, ""); // get the remaining string
     if (!recipient_username || !message) {
       printf("Error: Usage '/p2p <recipient_username> <Your Message>'\n");

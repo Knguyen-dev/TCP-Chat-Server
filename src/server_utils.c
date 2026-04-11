@@ -105,6 +105,7 @@ int register_user(int connfd, message_t *msg, uint8_t* extra_data, uint32_t *ext
   if (rc != 0) {
     return rc;
   }
+  string_to_lower(credentials.username);
 
   // If registered username isn't unique, reject request
   user_t user = {0};
@@ -145,6 +146,7 @@ int login_user(int connfd, message_t *msg, uint8_t *extra_data, uint32_t *extra_
   if (rc != 0) {
     return rc;
   }
+  string_to_lower(credentials.username);
 
   // Allocate memory for potentially new logged in user.
   user_t *user = (user_t *)malloc(sizeof(user_t));

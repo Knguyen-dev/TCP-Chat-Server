@@ -5,6 +5,7 @@
 #define LISTENQ 100
 #include <stdio.h>
 #include <unistd.h>
+#include <ctype.h>
 #include <errno.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -82,5 +83,11 @@ int get_valid_input_range(char *prompt, int min, int max);
  * - If this function encounters errors, the program is immediately aborted. 
  */
 void get_stdin(char *prompt, char *buffer, int buf_size);
+
+/**
+ * Lowercases an existing string
+ * @param str The input string we're trying to lowercase.
+ */
+void string_to_lower(char* str);
 
 #endif
