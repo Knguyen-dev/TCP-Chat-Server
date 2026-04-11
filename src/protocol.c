@@ -53,7 +53,7 @@ int read_one_message(int connfd, message_t* msg) {
   while (bytes_to_read > 0) {
     int bytes_read = read(connfd, buf_ptr, bytes_to_read);
     if (bytes_read == 0) {
-      LOG_ERROR("Unexpected EOF when reading msg header!\n");
+      LOG_ERROR("EOF when reading msg header. Remote peer closed!\n");
       return -1;
     }
     if (bytes_read == -1) {

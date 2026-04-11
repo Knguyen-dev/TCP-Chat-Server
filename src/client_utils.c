@@ -5,6 +5,22 @@
 // ---------------------------
 
 /**
+ * Prints a formatted message to stdout based on message type.
+ * Centralizes all message output formatting.
+ * 
+ * @param sender_username The username of the sender
+ * @param recipient_username The username of the recipient (NULL for global messages)
+ * @param message_content The content of the message
+ */
+void print_message(const char* sender_username, const char* recipient_username, const char* message_content) {
+  if (recipient_username != NULL) {
+    printf("[DM] %s -> %s> %s\n", sender_username, recipient_username, message_content);
+  } else {
+    printf("[GLOBAL] %s> %s\n", sender_username, message_content);
+  }
+}
+
+/**
  * Handles prompting user input and sending data over the wire.
  * 
  * @param clientfd The client fd associated with our TCP connection
@@ -130,7 +146,8 @@ void handle_world_message(int clientfd, user_t *user, char* message_content) {
     printf("Server Failure: Your message wasn't broadcasted.\n");
     return;
   }
-  printf("%s> %s\n", user->username, broadcast.message_content);
+
+  print_message(broadcast.sender_username, NULL, broadcast.message_content);
 }
 
 /**
@@ -165,7 +182,7 @@ void handle_peer_message(int clientfd, user_t* user, char* recipient_username, c
 
   // 3. Output results to the client
   if (response.rc == 0) {
-    printf("%s to %s> %s\n", user->username, recipient_username, message_content);
+    print_message(broadcast.sender_username, broadcast.recipient_username, broadcast.message_content);
   } else {
     printf("Server Failure (code=%d): P2P message was sent, but not broadcasted! Extra details: %s\n", response.rc, response_messages[response.rc]);
   }
@@ -173,16 +190,23 @@ void handle_peer_message(int clientfd, user_t* user, char* recipient_username, c
 
 /**
  * Handles receiving broadcast notification messages from the server. 
+ * 
+ * @param clientfd File descriptor linked to the TCP connection socket the client has with the server.
+ * @return 0 on success, otherwise -1 when the server closes connection.
  */
-void handle_broadcast_notification(int clientfd) {
+int handle_broadcast_notification(int clientfd) {
   message_t response = {0};
-  if (read_one_message(clientfd, &response) != 0) {
-    return;
+
+  // If failed, then return -1 to back out
+  if (read_one_message(clientfd, &response) == -1) {
+    printf("Server closed connection! Redirecting to main menu!\n");
+    return -1;
   }
+
   if (response.type != CHAT) {
     // NOTE: This shouldn't really happen.
     printf("Server response wasn't a chat message!\n");
-    return;
+    return -1;
   }
   int broadcast_type = peek_broadcast_type(&response);
   
@@ -190,13 +214,13 @@ void handle_broadcast_notification(int clientfd) {
     case TAG_P2P_BROADCAST: {
       p2p_broadcast_t broadcast = {0};
       parse_p2p_broadcast_notification(&response, &broadcast);
-      printf("%s whispers> %s\n", broadcast.sender_username, broadcast.message_content);
+      print_message(broadcast.sender_username, broadcast.recipient_username, broadcast.message_content);
       break;
     }
     case TAG_WORLD_BROADCAST: {
       world_broadcast_t broadcast = {0};
       parse_world_broadcast_notification(&response, &broadcast);
-      printf("%s says> %s\n", broadcast.sender_username, broadcast.message_content);
+      print_message(broadcast.sender_username, NULL, broadcast.message_content);
       break;
     }
     default: {
@@ -204,6 +228,8 @@ void handle_broadcast_notification(int clientfd) {
       printf("Unknown broadcast_type '%d'!\n", broadcast_type);
     }
   }
+
+  return 0;
 }
 
 // ---------------------------
@@ -213,9 +239,6 @@ void handle_broadcast_notification(int clientfd) {
 void shell(int clientfd, user_t* user) {
   char prompt[100] = {0};
   char command_buffer[10 + MAX_USERNAME_SIZE + MAX_MSG_CONTENT_SIZE + 1]; // Enough for "/<command>, where command=world or p2p" and additional args
-
-  // Prompt string uses the authenticated user's username
-  snprintf(prompt, sizeof(prompt), "%s> ", user->username);
   get_stdin(prompt, command_buffer, sizeof(command_buffer));
 
   char* command = strtok(command_buffer, " ");
@@ -269,7 +292,10 @@ void run_messaging_loop(int clientfd, user_t* user) {
 
     // Check if the server sent something
     if (fds[1].revents & POLLIN) {
-      handle_broadcast_notification(clientfd);
+      int rc = handle_broadcast_notification(clientfd);
+      if (rc == -1) {
+        break;
+      }
     }
 
     // Check if the user is typing something 

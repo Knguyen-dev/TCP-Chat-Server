@@ -31,7 +31,7 @@ int main(void) {
 
   int continue_loop = 1;
   while (continue_loop) {
-    int choice = get_valid_input_range("1. Create Account\n2. Contine with existing account\n3. Quit\nEnter your choice: ", 1, 3);
+    int choice = get_valid_input_range("1. Create Account\n2. Continue with existing account\n3. Quit\nEnter your choice: ", 1, 3);
     while (getchar() != '\n');
     switch (choice) {
       case 1:
