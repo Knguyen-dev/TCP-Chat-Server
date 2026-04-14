@@ -1,5 +1,5 @@
 
-#include "shared.h"
+#include "shared.hpp"
 
 #define MSG_HEADER_SIZE 7 // max header size in bytes
 #define MSG_MAX_PAYLOAD_SIZE 4096 // max payload size in bytes
@@ -7,15 +7,15 @@
 // Response messages corresponding with response codes 
 extern const char* response_messages[];
 
-// Struct representing a single message being transferred between client and server
+// Struct representing a message being transferred between client and server
 typedef struct {
-  uint8_t data_buf[MSG_HEADER_SIZE + MSG_MAX_PAYLOAD_SIZE]; // Full message buffer: header + payload
-  size_t data_len; // Total length of data in data_buf
-  uint8_t version; // Application-layer protocol version.
-  uint8_t type;    // Type of request/message being sent.
-  uint8_t rc;      // Response code, assuming type = ACK (the message represents a server response)
   uint32_t payload_length; // Size of the message payload in host byte order.
+  uint8_t version;         // Application-layer protocol version.
+  uint8_t type;            // Type of request/message being sent.
+  uint8_t rc;              // Response code, assuming type = ACK (the message represents a server response)
+  uint8_t* payload;        // Pointer to the start of the message's body/payload
 } message_t;
+
 
 /**
  * Message Types for the Global Header.
@@ -62,46 +62,34 @@ typedef enum {
 } tlv_tag_t;
 
 typedef struct {
-  char username[MAX_USERNAME_SIZE+1];
-  char password[MAX_PASSWORD_SIZE+1];
+  std::string username;
+  std::string password;
 } registration_credentials_t;
 
 typedef struct {
-  char username[MAX_USERNAME_SIZE+1];
-  char password[MAX_PASSWORD_SIZE+1];
+  std::string username;
+  std::string password;
 } login_credentials_t;
 
 typedef struct {
-  char sender_username[MAX_USERNAME_SIZE+1];
-  char message_content[MAX_MSG_CONTENT_SIZE+1];
+  std::string sender_username;
+  std::string message_content;
 } world_broadcast_t;
 
 typedef struct {
-  char sender_username[MAX_USERNAME_SIZE+1];
-  char recipient_username[MAX_USERNAME_SIZE+1];
-  char message_content[MAX_MSG_CONTENT_SIZE+1];
+  std::string sender_username;
+  std::string recipient_username;
+  std::string message_content;
 } p2p_broadcast_t;
 
 /**
- * Writes a TLV into a buffer.
+ * Parses a message and places field information into a message struct
+ * @param buffer Read-only buffer of data that contains the message header.
+ * @param message Reference to the message struct that we're going to populate with parsed header information.
  * 
- * @param buf A double pointer to a buffer. The motivation is that with a single pointer *buf
- *            modifications like buf += 1, doesn't update the pointer in the caller. However by 
- *            using a double pointer, we'll be able to update the buffer pointer in the caller.
- * @param tag The tag that we're giving the TLV; "what is it?".
- * @param len The size of the data (in bytes from 0-255) of the value, "how many bytes is it?".
- * @param value A pointer to the value that we want to write into the buffer
- * @param convert_to_network 1 to convert the value into network-byte-order, otherwise 0 for no conversion.
- *
- * NOTE: 
- * - Intends to mainly be a helper function to create_response.
- * - If len > 1, we know that the value ("payload") is a multi-byte type.
- * - Limitations: Since len is a uint8_t we can only represent payloads of size [0, 255] bytes. If we wanted to represent bigger payloads, 
- * we'd simply upgrade to uint16_t, allowing us to write values of size [0, 65335] bytes, which will later be useful for messages. Of course, 
- * if we decide to use uint16_t, we'd need to ensure the 16-bit integer is represented in network-byte-order and probably use memcpy to copy 
- * from bytes from the integer into the buffer.
+ * NOTE: Assumes buffer has the first MSG_HEADER_SIZE + 1 bytes of a message.
  */
-void write_tlv(uint8_t **buf, tlv_tag_t tag, uint8_t len, const void *value, int convert_to_network);
+void parse_message(const std::vector<uint8_t>& buffer, message_t& message);
 
 /**
  * Fully read one message from a connection socket 
@@ -121,19 +109,19 @@ int read_one_message(int connfd, message_t* msg);
  * 
  * NOTE: 
  * It's probably best for this function to assume that 
- * the fields and payload in the response messaeg to already be 
+ * the fields and payload in the response message to already be 
  * in network byte order.
  */
 int write_one_message(int connfd, message_t* response);
 
 /**
  * Builds a user registration request
- * @param request Pointer to request message that we're going to populate.
- * @param credentials Pointer to a struct containing the user registration credentials that the user inputted in.
+ * @param request Request message that we're going to populate with user registration data.
+ * @param credentials Struct containing the user registration credentials that the user inputted in.
  * @return 0 on success, -1 on error 
  * NOTE: Used by the client to create a registration request message.
  */
-int build_register_request(message_t *request, registration_credentials_t *credentials);
+int build_register_request(message_t& request, registration_credentials_t& credentials);
 
 /**
  * Parses a user registration request message and populates credentials object with it.
@@ -144,18 +132,18 @@ int build_register_request(message_t *request, registration_credentials_t *crede
  * 
  * NOTE: Supposed to be used by the server.
  */
-int parse_register_request(message_t *msg, registration_credentials_t *credentials);
+int parse_register_request(message_t& msg, registration_credentials_t& credentials);
 
 /**
  * Builds a login request message using login credentials
  * 
  * @param request Request message that we'll populate.
  * @param credentials Credentials that the user created that we'll use to create the login request message.
- * @return 0 on succcess, -1 on error
+ * @return 0 on success, -1 on error
  * 
  * NOTE: Intended to be used by the client
  */
-int build_login_request(message_t *request, login_credentials_t *credentials);
+int build_login_request(message_t& request, login_credentials_t& credentials);
 
 /**
  * Parses a login request message and populates credentials object.
@@ -165,7 +153,7 @@ int build_login_request(message_t *request, login_credentials_t *credentials);
  * 
  * NOTE: Intended to be used by the server.
  */
-int parse_login_request(message_t *request, login_credentials_t *credentials);
+int parse_login_request(message_t& request, login_credentials_t& credentials);
 
 /**
  * Creates a request message for a world broadcast
@@ -177,24 +165,24 @@ int parse_login_request(message_t *request, login_credentials_t *credentials);
  * NOTE: This is supposed to be used by the client since the client is the one initiating 
  * the world broadcast request.
  */
-int build_world_broadcast(message_t *request, world_broadcast_t *broadcast);
+int build_world_broadcast(message_t& request, world_broadcast_t& broadcast);
 
 /**
  * Parses a request and populate a world broadcast object with its info.
  * 
- * @param msg Request message sent by the client that indicates they're doing a world broadcast.
- * @param broadcast Pointer to world broadcast struct that we'll fill with data from this request message.
+ * @param request Request message sent by the client that indicates they're doing a world broadcast.
+ * @param broadcast World broadcast that we'll fill with data from this request message.
  * @return 0 if parsing is correct, otherwise a response code.
  * 
  * NOTE: This is supposed to be used server-side
  */
-int parse_world_broadcast(message_t *msg, world_broadcast_t *broadcast);
+int parse_world_broadcast(message_t& request, world_broadcast_t& broadcast);
 
 /**
  * Build a world-broadcast response message. 
  * 
- * @param response Pointer to response message that we'll fill and write to all other users.
- * @param broadcast Pointer to the broadcast object that contains the message that they want send
+ * @param response The response message that we'll fill and write to all other users.
+ * @param broadcast the broadcast object that contains the message that they want send
  * to all other users.
  * 
  * NOTE: 
@@ -203,7 +191,7 @@ int parse_world_broadcast(message_t *msg, world_broadcast_t *broadcast);
  * that's sent to all other users.
  * - Same as build_world_broadcast_request, meaning the message format is same for client and server.
  */
-int build_world_broadcast_notification(message_t *response, world_broadcast_t *broadcast);
+int build_world_broadcast_notification(message_t& response, world_broadcast_t& broadcast);
 
 /**
  * Parses a notification for a world broadcast
@@ -216,7 +204,7 @@ int build_world_broadcast_notification(message_t *response, world_broadcast_t *b
  * - Intended to be used by the client to parse world broadcasts. 
  * - Since world broadcasts and world broadcast notifications are the same, the logic for parsing them are the same.
  */
-int parse_world_broadcast_notification(message_t *msg, world_broadcast_t *broadcast);
+int parse_world_broadcast_notification(message_t& msg, world_broadcast_t& broadcast);
 
 /**
  * Creates request message for a p2p broadcast
@@ -224,19 +212,19 @@ int parse_world_broadcast_notification(message_t *msg, world_broadcast_t *broadc
  * @param broadcast Broadcast object that the client filled.
  * @return 0 on success, non-zero return code on error.
  * 
- * NOTE: This is supposed to be used by the client since they're the one initating 
+ * NOTE: This is supposed to be used by the client since they're the one initiating 
  * the p2p broadcast request.
  */
-int build_p2p_broadcast(message_t *request, p2p_broadcast_t *broadcast);
+int build_p2p_broadcast(message_t& request, p2p_broadcast_t& broadcast);
 
 /**
  * Parses a message sent by the client and populates the p2p broadcast object.
- * @param msg Request message sent by the client to do a p2p broadcast.
+ * @param request Request message sent by the client to do a p2p broadcast.
  * @param broadcast Broadcast message that we'll populate with data from the request message
  * 
  * NOTE: Supposed to be used by the server
  */
-int parse_p2p_broadcast(message_t *msg, p2p_broadcast_t *broadcast);
+int parse_p2p_broadcast(message_t& request, p2p_broadcast_t& broadcast);
 
 /**
  * Builds a p2p broadcast response message
@@ -250,7 +238,7 @@ int parse_p2p_broadcast(message_t *msg, p2p_broadcast_t *broadcast);
  * we build a message that we'll send to the recipient. This message will contain the message from the sender.
  * - Identical format to creating a P2P broadcast, so client and sender have the same message format.
  */
-int build_p2p_broadcast_notification(message_t *response, p2p_broadcast_t *broadcast);
+int build_p2p_broadcast_notification(message_t& response, p2p_broadcast_t& broadcast);
 
 /**
  * Parses a notification for a p2p broadcast
@@ -259,16 +247,17 @@ int build_p2p_broadcast_notification(message_t *response, p2p_broadcast_t *broad
  * @param broadcast The P2P broadcast object we'll parse that message data into
  * @return 0 on success, non-zero code on error.
  */
-int parse_p2p_broadcast_notification(message_t *msg, p2p_broadcast_t *broadcast);
+int parse_p2p_broadcast_notification(message_t& msg, p2p_broadcast_t& broadcast);
 
 /**
  * Given a request message for a chat, return the type of broadcast it wants to do.
  * 
- * @param msg The request message sent by the client, where message->type = CHAT. 
- * @return The tag value of the broadcast, otherwise -1 on error.
+ * @param request The request message sent by the client, where message->type = CHAT. 
+ * @return The tag value of the broadcast.
+ * 
  * NOTE: Should be used by client and server.
  */
-int peek_broadcast_type(message_t *msg);
+tlv_tag_t peek_broadcast_type(message_t& request);
 
 /**
  * Builds a server response message to be sent to a user, an ACK!

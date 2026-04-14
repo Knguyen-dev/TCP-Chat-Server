@@ -2,7 +2,6 @@
 #define SHARED_H
 
 #define _POSIX_C_SOURCE 200112L
-#define LISTENQ 100
 #include <stdio.h>
 #include <unistd.h>
 #include <ctype.h>
@@ -14,8 +13,16 @@
 #include <pthread.h>
 #include <fcntl.h>
 #include <stdlib.h>
-
 #include <stdarg.h>
+
+
+// In C++
+#include <iostream>
+#include <vector>
+#include <string>
+#include <algorithm> // string lowercasing algo
+#include <cctype>
+#include <limits> // Required for std::numeric_limits
 
 void private_log_logic(const char* func_name, int line, const char* format, ...);
 #define LOG_ERROR(...) private_log_logic(__func__, __LINE__, __VA_ARGS__)
@@ -30,11 +37,10 @@ void private_log_logic(const char* func_name, int line, const char* format, ...)
 // -----------------------------------
 
 // Struct representing a user in our application.
-// NOTE: 72 bytes, tail padding of 2 bytes.
 typedef struct {
-  uint32_t id;                          // Incrementing ID associated with the user.
-  char username[MAX_USERNAME_SIZE + 1]; // Username of the user.
-  char password[MAX_PASSWORD_SIZE + 1]; // Plain-text password for the user.
+  uint32_t id;          // Incrementing ID associated with the user.
+  std::string username; // Username of the user.
+  std::string password; // Plain-text password for the user.
 } user_t;
 
 // -----------------------------------
@@ -42,21 +48,16 @@ typedef struct {
 // -----------------------------------
 
 // Struct representing an existing TCP client
-// NOTE: 144 bytes, 4 bytes of padding
 typedef struct {
-  struct sockaddr_storage addr; // An IPv4 or IPv6 address structure (128 bytes).
-  user_t* user;                 // Pointer to the user associated with the connection; if pointer isn't NULL, this is an authenticated user
-  int connfd;                   // Integer containing the file descriptor for the TCP connection socket.
+  struct sockaddr_storage addr;  // An IPv4 or IPv6 address structure (128 bytes).
+  user_t* user;                  // Pointer to the user associated with the connection; if pointer isn't NULL, this is an authenticated user
+  int fd;                        // Integer containing the file descriptor for the TCP connection socket.
+  bool want_read = false;        // Booleans indicating readiness intentions
+  bool want_write = false;
+  bool want_close = false;
+  std::vector<uint8_t> incoming; // Buffer stores data read (and needs to be parsed) by our user-space app from the kernel.
+  std::vector<uint8_t> outgoing; // Buffer stores  data that needs to be written to the peer.
 } conn_t;
-
-// Struct representing dynamic array of connections. 
-// NOTE: Indexed by connfd, so accessing items[i] accesses conn_t associated with 
-// connection descriptor integer i. In total, 24 bytes, no padding.
-typedef struct {
-  size_t count;    // Current number of items in the array
-  size_t capacity; // Maximum number of entries in the dynamic array
-  conn_t* items;   // Pointer to the start of an array of conn_t structs
-} Connections;
 
 /**
  * Prompts input for a value within a given range.
@@ -85,9 +86,29 @@ int get_valid_input_range(char *prompt, int min, int max);
 void get_stdin(char *prompt, char *buffer, int buf_size);
 
 /**
- * Lowercases an existing string
- * @param str The input string we're trying to lowercase.
+ * Lowercases an existing string and returns the lowercased version.
+ * @param s String to be lowercased.
+ * @return The lowercased version of the string.
  */
-void string_to_lower(char* str);
+std::string string_to_lower(std::string s);
+
+/**
+ * Prints warning or system event messages to stderr.
+ * It doesn't kill the application
+ */
+void msg(const char *msg);
+
+/**
+ * Shows an error message and kills the application.
+ */
+void die(const char *msg);
+
+/**
+ * Gets string input in a safe and robust manner
+ * @param prompt Input prompt to print before prompting user for input.
+ * @param buffer Reference to string buffer that we're going to write input into.
+ */
+void get_string_cin(std::string prompt, std::string& buffer);
+
 
 #endif

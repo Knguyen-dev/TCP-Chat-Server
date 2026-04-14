@@ -1,18 +1,17 @@
-#include "client_utils.h"
+#include "client_utils.hpp"
 
 // ---------------------------
 // Client Service API e.g. login, registration, messaging.
 // ---------------------------
 
 /**
- * Prints a formatted message to stdout based on message type.
- * Centralizes all message output formatting.
+ * Prints a formatted message to stdout based on message type. Centralizes all message output formatting.
  * 
  * @param sender_username The username of the sender
  * @param recipient_username The username of the recipient (NULL for global messages)
  * @param message_content The content of the message
  */
-void print_message(const char* sender_username, const char* recipient_username, const char* message_content) {
+void print_message(std::string_view sender_username, std::string_view recipient_username, std::string_view message_content) {
   if (recipient_username != NULL) {
     printf("[DM] %s -> %s> %s\n", sender_username, recipient_username, message_content);
   } else {
@@ -27,25 +26,15 @@ void print_message(const char* sender_username, const char* recipient_username, 
  * @return 0 on success, otherwise -1 on error.
  */
 int handle_client_registration(int clientfd) {
+
+  // Get user credentials
   registration_credentials_t credentials = {0};
-
-  printf("Enter a username: ");
-  if (fgets(credentials.username, sizeof(credentials.username), stdin) == NULL) {
-    fprintf(stderr, "Error reading username\n");
-    return -1;
-  }
-  credentials.username[strcspn(credentials.username, "\n")] = '\0';  // Remove newline
-
-  printf("Enter a password: ");
-  if (fgets(credentials.password, sizeof(credentials.password), stdin) == NULL) {
-    fprintf(stderr, "Error reading password\n");
-    return -1;
-  }
-  credentials.password[strcspn(credentials.password, "\n")] = '\0';  // Remove newline
+  get_string_cin("Enter a username: ", credentials.username);
+  get_string_cin("Enter a password: ", credentials.password);
 
   // 1. Create request message
   message_t request_message = {0};
-  if (build_register_request(&request_message, &credentials) == -1) {
+  if (build_register_request(request_message, credentials) == -1) {
     return -1;
   }
 
@@ -70,26 +59,17 @@ int handle_client_registration(int clientfd) {
  * @param user Pointer to a user struct that we'll populate with the info of the authenticated user.
  * @return 0 on successful login, otherwise -1.
  */
-int handle_client_login(int clientfd, user_t *user) {
+int handle_client_login(int clientfd, user_t& user) {
+  
+  // Build login credentials
+  // TODO: Update get_string_cin to do length checks please
   login_credentials_t credentials = {0};
-
-  printf("Username: ");
-  if (fgets(credentials.username, sizeof(credentials.username), stdin) == NULL) {
-    fprintf(stderr, "Error reading username\n");
-    return -1;
-  }
-  credentials.username[strcspn(credentials.username, "\n")] = '\0';
-
-  printf("Password: ");
-  if (fgets(credentials.password, sizeof(credentials.password), stdin) == NULL) {
-    fprintf(stderr, "Error reading password\n");
-    return -1;
-  }
-  credentials.password[strcspn(credentials.password, "\n")] = '\0';
+  get_string_cin("Username: ", credentials.username);
+  get_string_cin("Password: ", credentials.password);
   
   // 1. Create request message and send it across the wire
   message_t request = {0};
-  if (build_login_request(&request, &credentials) != 0) {
+  if (build_login_request(request, credentials) != 0) {
     return -1;
   }
   if (write_one_message(clientfd, &request) == -1) {
@@ -106,7 +86,8 @@ int handle_client_login(int clientfd, user_t *user) {
     return -1;
   }
 
-  strcpy(user->username, credentials.username);
+  user.username = credentials.username;
+
   printf("Login successful: Now joined as '%s'!\n", credentials.username);
   return 0;
 }
@@ -117,13 +98,13 @@ int handle_client_login(int clientfd, user_t *user) {
  * @param user User that the client is logged in as.
  * @param message_content The text or message content that we're sending to all other users.
  */
-void handle_world_message(int clientfd, user_t *user, char* message_content) {
+void handle_world_message(int clientfd, user_t& user, char& message_content) {
   // 1. Build world broadcast request message
   world_broadcast_t broadcast = {0};
-  strcpy(broadcast.sender_username, user->username);
-  strcpy(broadcast.message_content, message_content);
+  broadcast.sender_username = user.username;
+  broadcast.message_content = message_content;
   message_t request = {0};
-  if (build_world_broadcast(&request, &broadcast) != 0) {
+  if (build_world_broadcast(request, broadcast) != 0) {
     printf("Client Failure: Failed to build world broadcast!\n");
     return;
   }
@@ -157,17 +138,20 @@ void handle_world_message(int clientfd, user_t *user, char* message_content) {
  * @param recipient_username The username of the recipient user that the message is being sent to.
  * @param message_content The text or message content that we're sending to the recipient user.
  */
-void handle_peer_message(int clientfd, user_t* user, char* recipient_username, char* message_content) {
+void handle_peer_message(int clientfd, user_t& user, char& recipient_username, char& message_content) {
+  
   // 1. Create world broadcast request and send it over the wire
   p2p_broadcast_t broadcast = {0};
-  strcpy(broadcast.sender_username, user->username);
-  strcpy(broadcast.recipient_username, recipient_username);
-  strcpy(broadcast.message_content, message_content);
+  broadcast.sender_username = user.username;
+  broadcast.recipient_username = recipient_username;
+  broadcast.message_content = message_content;
   message_t request = {0};
-  if (build_p2p_broadcast(&request, &broadcast) != 0) {
+  if (build_p2p_broadcast(request, broadcast) != 0) {
     printf("Client Failure: Failed to build P2P broadcast!\n");
     return;
   }
+  
+  // TODO: Prefer reference variables over pointers please.
   if (write_one_message(clientfd, &request) == -1) {
     printf("Client Failure: Failed to write P2P broadcast!\n");
     return;

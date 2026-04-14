@@ -1,5 +1,5 @@
-#include "shared.h"
-#include "client_utils.h"
+#include "shared.hpp"
+#include "client_utils.hpp"
 #include <signal.h>
 
 int clientfd = -1;
@@ -12,8 +12,6 @@ void sigint_handler(int sigint) {
   }
   exit(0);
 }
-
-
 
 int main(void) {
   char input_ip[16] = "0.0.0.0";

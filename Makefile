@@ -14,6 +14,9 @@ SRC_DIR   = src
 INC_DIR   = include
 PORT     ?= 8080
 
+
+# TODO: Update makefile for C++ compilation
+
 # Header files (for dependency tracking)
 HEADERS   = $(wildcard $(INC_DIR)/*.h)
 

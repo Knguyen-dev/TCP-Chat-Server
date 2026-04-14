@@ -1,4 +1,4 @@
-#include "shared.h"
+#include "shared.hpp"
 
 /**
  * Reusable error logging function
@@ -73,10 +73,43 @@ void get_stdin(char *prompt, char *buffer, int buf_size) {
   }
 }
 
-void string_to_lower(char* str) {
-  int i = 0;
-  while (str[i] != '\0') {
-    str[i] = tolower((unsigned char)str[i]);
-    i += 1;
+std::string string_to_lower(std::string s) {
+  std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+    return std::tolower(c);
+  });
+  return s;
+}
+
+void msg(const char *msg) {
+  fprintf(stderr, "%s\n", msg);
+}
+
+void die(const char *msg) {
+  fprintf(stderr, "[%d] %s\n", errno, msg);
+  abort();
+}
+
+
+void ignore_line() {
+  std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+}
+
+/**
+ * Safely get input
+ */
+void get_string_cin(std::string prompt, std::string& buffer) {
+  while (true) {
+    std::cout << prompt;
+    std::cin >> buffer;
+    if (!std::cin) {         // If prev extraction failed  
+      if (!std::cin.eof()) { // If user entered an eof, then shut down
+        std::exit(-1);
+      }
+      std::cin.clear(); // put std::cin back into 'normal' mode
+      ignore_line();    // remove bad input from input stream      
+      continue;
+    }
+    ignore_line(); // ignore any potential/additional input on the line that's invalid
+    break;
   }
 }
