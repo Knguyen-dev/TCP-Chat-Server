@@ -1,14 +1,19 @@
 #include "protocol.hpp"
 
-const char* response_messages[] = {
-  [RESP_OK] = "Success",
-  [RESP_ERROR_MALFORMED] = "Malformed request",
-  [RESP_ERROR_USER_EXISTS] = "Username already taken",
-  [RESP_ERROR_USER_NOT_FOUND] = "User not found",
-  [RESP_ERROR_INVALID_CREDENTIALS] = "Invalid credentials",
-  [RESP_ERROR_INTERNAL] = "Internal server error",
-  [RESP_ERROR_UNKNOWN_COMMAND] = "Unknown command"
-};
+std::string get_response_message(response_code_t code) {
+  switch (code) {
+    case RESP_OK: return "Success";
+    case RESP_ERROR_MALFORMED: return "Malformed request";
+    case RESP_ERROR_USER_EXISTS: return "Username already taken";
+    case RESP_ERROR_USER_NOT_FOUND: return "User not found";
+    case RESP_ERROR_INVALID_CREDENTIALS: return "Invalid credentials";
+    case RESP_ERROR_INTERNAL: return "Internal server error";
+    case RESP_ERROR_UNKNOWN_COMMAND: return "Unknown command";
+  }
+  std::stringstream ss;
+  ss << "Unknown response code: " << code << "!";
+  return ss.str();
+}
 
 
 /**
@@ -64,12 +69,131 @@ static void write_tlv(uint8_t* &buf, tlv_tag_t tag, uint8_t len, const void *val
   buf += len;
 }
 
-// TODO: Re-add blocking read and blocking writes. This would be useful for the client
-// side 
+void buf_append(std::vector<uint8_t> &buf, const uint8_t *data, size_t len) {
+  buf.insert(buf.end(), data, data + len);
+}
 
+void buf_consume(std::vector<uint8_t> &buf, size_t n) {
+  buf.erase(buf.begin(), buf.begin() + n);
+}
 
+int read_one_message(conn_t& conn, message_t& msg) {
 
+  // ##### 1. Read message header and copy it to the conn_t::incoming #####
+  uint8_t buffer[1024 * 32];
+  uint8_t *ptr = buffer;
+  int bytes_to_read = MSG_HEADER_SIZE;
+  while (bytes_to_read > 0) {
+    int bytes_read = read(conn.fd, ptr, bytes_to_read);
+    if (bytes_read == 0) {
+      fprintf(stderr, "EOF when reading msg header. Remote peer closed!\n");
+      return -1;
+    }
 
+    // Interrupted by signal handling; not a real error, re-read.
+    if (bytes_read == -1 && (errno == EINTR)) {
+      continue;
+    }
+
+    if (bytes_read == -1) {
+      fprintf(stderr, "read error when reading msg header: %s\n", strerror(errno));
+      return -1;
+    }
+    ptr += bytes_read;
+    bytes_to_read -= bytes_read;
+  }
+
+  // ##### 2. Insert data into conn_t::incoming and parse Header Fields into msg_t #####
+  // a. bytes 0-2 are version, type, and response code
+  // b. bytes 3-6 represent the payload length; handle byte order conversion and validate payload size
+  conn.incoming.insert(conn.incoming.end(), buffer, buffer+MSG_HEADER_SIZE);
+  msg.version = buffer[0];
+  msg.type = buffer[1];
+  msg.rc = buffer[2];
+  memcpy(&msg.payload_length, buffer+3, sizeof(msg.payload_length));
+  msg.payload_length = ntohl(msg.payload_length);
+  if (msg.payload_length > MSG_MAX_PAYLOAD_SIZE) {
+    fprintf(stderr, "read_one_message: Payload of size '%d' is bigger than maximum!\n", msg.payload_length);
+    return -1;
+  }
+
+  // ##### Step 3: Read the message payload from peer #####
+  // NOTE: Resets pointer to point at the start of the buffer, which will probably overwite 
+  // those 7 header bytes which is fine because those bytes have already been saved into conn_t::incoming
+  bytes_to_read = msg.payload_length;
+  ptr = &buffer[0];
+  while (bytes_to_read > 0) {
+    int bytes_read = read(conn.fd, ptr, bytes_to_read);
+    if (bytes_read == 0) {
+      fprintf(stderr, "Unexpected EOF when reading msg payload!\n");
+      return -1;
+    }
+    if (bytes_read == -1) {
+      fprintf(stderr, "read error when reading msg payload: %s\n", strerror(errno));
+      return -1;
+    }    
+    ptr += bytes_read;
+    bytes_to_read -= bytes_read;
+  }
+
+  // a. Append message payload to the back conn_t::incoming 
+  // b. Update message_t::payload to point at the start of the payload in conn_t::incoming
+  // NOTE: An std::vector::insert can cause a reallocation, causing all previous pointers 
+  // pointing to it to become dangling. That's why you always insert data first and then start assigning pointers.
+  conn.incoming.insert(conn.incoming.end(), buffer, buffer+msg.payload_length);
+  size_t payload_offset = conn.incoming.size() - msg.payload_length;
+  msg.payload = conn.incoming.data() + payload_offset;
+
+  return 0;
+}
+
+int write_one_message(conn_t& conn, message_t& msg) { 
+  size_t bytes_sent = 0;
+  std::vector<uint8_t>& buf = conn.outgoing;
+  size_t bytes_to_send = msg.payload_length+MSG_HEADER_SIZE;
+  uint8_t* ptr = buf.data();
+
+  while (bytes_sent < bytes_to_send) {
+    int res = write(conn.fd, ptr, bytes_to_send-bytes_sent);
+    if (res <= 0) {
+      // If signal interruption, then continue looping
+      if (res < 0 && errno == EINTR) {
+        continue;
+      }
+        
+      // Otherwise an actual error or remote connection closed.
+      fprintf(stderr, "Failed to write one message with errno '%s'\n", strerror(errno));
+      return -1;
+    }
+    ptr += res;
+    bytes_sent += res;    
+  }
+  
+  // Remove those bytes from the beginning of output buffer
+  buf.erase(buf.begin(), buf.begin() + bytes_sent);
+  return (int)bytes_to_send;
+}
+
+void write_message_to_buffer(std::vector<uint8_t>& buffer, message_t& message) {
+  size_t total_size = sizeof(message.version) + 
+    sizeof(message.type) + 
+    sizeof(message.rc) +
+    sizeof(message.payload_length) +
+    message.payload_length;
+  
+  // Reallocate buffer size to a new maximum capacity if needed
+  buffer.reserve(buffer.size() + total_size);
+  buf_append(buffer, &message.version, sizeof(message.version));
+  buf_append(buffer, &message.type, sizeof(message.type));
+  buf_append(buffer, &message.rc, sizeof(message.rc));
+
+  uint32_t net_payload_len = htonl(message.payload_length);
+  buf_append(buffer, (const uint8_t*)&net_payload_len, sizeof(net_payload_len));
+  if (message.payload && message.payload_length > 0) {
+    // Then read from the payload ptr and read data into output buffer 
+    buf_append(buffer, message.payload, message.payload_length);
+  }  
+}
 
 void parse_message(const std::vector<uint8_t>& buffer, message_t& message) {
   // Parse header fields into message header struct
@@ -429,43 +553,12 @@ tlv_tag_t peek_broadcast_type(message_t& request) {
   return tag;
 }
 
-int build_server_response(message_t* response, response_code_t rc, uint8_t *data_buf, uint32_t buf_len) {
-  // Build Header fields
-  response->version = 1;
-  response->type = ACK;
-  response->rc = rc;
-
-  // Build Message Payload using data_buf; payload should be 
-  uint8_t *data_buf_end = data_buf + buf_len;
-  uint8_t *payload_start = response->data_buf + MSG_HEADER_SIZE;
-  uint8_t* moving_ptr = payload_start;
-
-  while (data_buf < data_buf_end) {
-    tlv_tag_t tag = *data_buf++;
-    uint8_t length = *data_buf++;
-    uint8_t value_buf[length];
-    memcpy(value_buf, data_buf, length);
-    data_buf += length;
-
-    // TODO: Figure out a way to encode the endianness of each TLV value in the data_buf.
-    write_tlv(&moving_ptr, tag, length, (const void*)value_buf, 0);
-  }
-
-  // verify and update payload length
-  uint32_t payload_len = (uint32_t)(moving_ptr - payload_start);
-  response->payload_length = payload_len;
-  if (payload_len > MSG_MAX_PAYLOAD_SIZE) {
-    LOG_ERROR("Creating payload of size '%d', but maximum is '%d'\n", payload_len, MSG_MAX_PAYLOAD_SIZE);
-    return -1;
-  }
-
-  // Write header to data_buf
-  response->data_buf[0] = response->version;
-  response->data_buf[1] = response->type;
-  response->data_buf[2] = response->rc;
-  uint32_t net_len = htonl(response->payload_length);
-  memcpy(&response->data_buf[3], &net_len, sizeof(uint32_t));
-  response->data_len = MSG_HEADER_SIZE + payload_len;
-
-  return 0;
+message_t build_server_response(response_code_t rc, uint8_t *payload, uint32_t payload_len) {
+  message_t response;
+  response.version = 1;
+  response.type = ACK;
+  response.rc = rc;
+  response.payload = payload;
+  response.payload_length = payload_len;
+  return response;
 }

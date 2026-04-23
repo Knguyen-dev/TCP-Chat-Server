@@ -5,7 +5,7 @@
 #define MSG_MAX_PAYLOAD_SIZE 4096 // max payload size in bytes
 
 // Response messages corresponding with response codes 
-extern const char* response_messages[];
+extern const std::string response_messages[];
 
 // Struct representing a message being transferred between client and server
 typedef struct {
@@ -59,6 +59,10 @@ typedef enum {
   TAG_SENDER_USERNAME = 9,
   TAG_RECIPIENT_USERNAME = 10,
   TAG_MESSAGE_CONTENT = 11,
+
+  // TODO: Use the timestamp to represenet when the user got the 
+  // message
+  TAG_TIMESTAMP = 12
 } tlv_tag_t;
 
 typedef struct {
@@ -82,37 +86,73 @@ typedef struct {
   std::string message_content;
 } p2p_broadcast_t;
 
+
+/**
+ * Gets the response message string asscoiated with a response code
+ * @param code Response code in question
+ * @return A message string representing the response code.
+ */
+std::string get_response_message(response_code_t code);
+
+/**
+ * Append bytes to the back of a given buffer
+ * @param buf Reference variable to the buffer we're appending data into.
+ * @param data Pointer to the a buffer we'll read data from and copy into said buffer.
+ * @param len Number of bytes we're copying from data into buf.
+ */
+void buf_append(std::vector<uint8_t> &buf, const uint8_t *data, size_t len);
+
+/**
+ * Remove data from the start of the buffer
+ * @param buf Reference to the buffer that we're erasing data from.
+ * @param n Number of bytes we want to remove from the start of the buffer.
+ */
+void buf_consume(std::vector<uint8_t> &buf, size_t n);
+
 /**
  * Parses a message and places field information into a message struct
- * @param buffer Read-only buffer of data that contains the message header.
+ * @param buffer Read-only buffer of data that contains the message header. This represents the conn_t::incoming that contains the message we got from the remote.
  * @param message Reference to the message struct that we're going to populate with parsed header information.
  * 
- * NOTE: Assumes buffer has the first MSG_HEADER_SIZE + 1 bytes of a message.
+ * NOTE: This can be used client and server-side. On the server side, we assume the
+ * buffer has the first `MSG_HEADER_SIZE + 1` bytes of a message. For now, we want that 
+ * extra byte so that we can get a pointer to the start of the message body. The idea being 
+ * that we don't have to manually copy the memory from the message body into a message_t struct, just 
+ * use a pointer to the conn_t::incoming, which will retain that message body we're done parsing 
+ * the message.
  */
 void parse_message(const std::vector<uint8_t>& buffer, message_t& message);
 
 /**
- * Fully read one message from a connection socket 
+ * Writes the serialized data of a message into a buffer
+ * @param buffer Buffer that we're appending data to the end to. This represents the conn_t::outgoing buffer
+ * @param message Message that we're serializing and writing into the buffer.
  * 
- * @param connfd File descriptor for the connection socket we're reading from.
- * @param msg Pointer to message_t struct that we're storing the message information in.
- * @return 0 on success, -1 otherwise
+ * NOTE: This function has been designed with server-side use in mind. ATP 
+ * we're writing into the conn_t::outgoing buffer. The request message should 
+ * have everything set already, we only need to deal with writing bytes, endian-ness
+ * etc. This operation should ont be interrupted.
  */
-int read_one_message(int connfd, message_t* msg);
+void write_message_to_buffer(std::vector<uint8_t>& buffer, message_t& message);
 
 /**
- * Writes one message across the TCP socket 
- * 
- * @param connfd Descriptor for the connection socket 
- * @param response Response message that we want to write to the remote peer.
- * @return Number of bytes sent, otherwise -1 on error
- * 
- * NOTE: 
- * It's probably best for this function to assume that 
- * the fields and payload in the response message to already be 
- * in network byte order.
+ * Performs a blocking read to get one full message from the remote peer.
+ * @param conn Connection that we're going to be reading from and appending data to the conn_t::incoming.
+ * @param msg Message struct that'll be populated which'll contain readable information about the processed message.
+ * @return 0 on success, otherwise -1.
  */
-int write_one_message(int connfd, message_t* response);
+int read_one_message(conn_t& conn, message_t& msg);
+
+/**
+ * Performs a blocking write to write one full message from the conn_t::outgoing into the socket
+ * @param conn Connection that we're going to write to.
+ * @param msg The response message that we're writing to the remote peer
+ * 
+ * NOTE: This is kind of jank because like you're reading the bytes from 
+ * the message object's payload pointer, which points to the conn_t::outgoing dynamic
+ * vector. And then you update the dynamic vector to erase the data we've written.
+ */
+int write_one_message(conn_t& conn, message_t& msg);
 
 /**
  * Builds a user registration request
@@ -262,10 +302,10 @@ tlv_tag_t peek_broadcast_type(message_t& request);
 /**
  * Builds a server response message to be sent to a user, an ACK!
  * 
- * @param response Pointer to response message struct that this function will populate.
  * @param rc Response code of the response.
- * @param data_buf Pointer to the start of the buffer that contains data we'll fill the payload with.
- * @param data_buf_len Length of the data_buf in bytes.
+ * @param payload Pointer to start of the buffer that contains the payload data. This is assumed to already have the stream of TLVs already contained in it.
+ * @param payload_len Length of the payload buffer
+ * @return Response message that represent an ACK
  * 
  * NOTE: For our TCP server, there'll be a couple types of messages that the server 
  * sends back to the client. The most prominent will be the broadcast notification messages obviously, where 
@@ -273,7 +313,7 @@ tlv_tag_t peek_broadcast_type(message_t& request);
  * of message that a server will send is an ACK, which tells the client that their request to do an action
  * was successful! This function builds the ACK message! 
  */
-int build_server_response(message_t* response, response_code_t rc, uint8_t *data_buf, uint32_t data_buf_len);
+message_t build_server_response(response_code_t rc, uint8_t *payload, uint32_t payload_len);
 
 
 /**

@@ -1,35 +1,33 @@
 # Variables
-CC        = gcc
+CCX        = g++
 DEBUG    ?= 0
 DEBUG_FLAGS =
 ifeq ($(DEBUG),1)
-DEBUG_FLAGS = -g -O0
+	DEBUG_FLAGS = -g -O0
 else
-DEBUG_FLAGS = -O2
+	DEBUG_FLAGS = -O2
 endif
-CFLAGS    = -Wall -Werror -std=c11 -pedantic -Iinclude $(DEBUG_FLAGS)
+CXXFLAGS    = -Wall -Werror -std=c++17 -pedantic -Iinclude $(DEBUG_FLAGS)
 LDFLAGS = -lsqlite3
 BUILD_DIR = build
 SRC_DIR   = src
 INC_DIR   = include
 PORT     ?= 8080
 
-
-# TODO: Update makefile for C++ compilation
-
 # Header files (for dependency tracking)
-HEADERS   = $(wildcard $(INC_DIR)/*.h)
+HEADERS   = $(wildcard $(INC_DIR)/*.hpp)
 
 # File groups: Shared code, client specific, and server specific code
-SHARED_SRC  = $(SRC_DIR)/shared.c $(SRC_DIR)/protocol.c
-SERVER_SRCS = $(SRC_DIR)/server.c $(SRC_DIR)/server_utils.c $(SRC_DIR)/db.c $(SHARED_SRC)
-CLIENT_SRCS = $(SRC_DIR)/client.c $(SRC_DIR)/client_utils.c $(SHARED_SRC)
-TEST_SRCS   = $(SRC_DIR)/client_tests.c $(SHARED_SRC)
+SHARED_SRC  = $(SRC_DIR)/shared.cpp $(SRC_DIR)/protocol.cpp
+SERVER_SRCS = $(SRC_DIR)/server.cpp $(SRC_DIR)/server_utils.cpp $(SRC_DIR)/db.cpp $(SHARED_SRC)
+CLIENT_SRCS = $(SRC_DIR)/client.cpp $(SRC_DIR)/client_utils.cpp $(SHARED_SRC)
+
+TEST_SRCS   = $(SRC_DIR)/client_tests.cpp $(SHARED_SRC)
 
 # Object files (maps src/*.c to build/*.o); source to object files
-SERVER_OBJS = $(SERVER_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
-CLIENT_OBJS = $(CLIENT_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
-TEST_OBJS   = $(TEST_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
+SERVER_OBJS = $(SERVER_SRCS:$(SRC_DIR)/%.cpp=$(BUILD_DIR)/%.o)
+CLIENT_OBJS = $(CLIENT_SRCS:$(SRC_DIR)/%.cpp=$(BUILD_DIR)/%.o)
+TEST_OBJS   = $(TEST_SRCS:$(SRC_DIR)/%.cpp=$(BUILD_DIR)/%.o)
 
 .PHONY: all build-server build-client run-server run-client test clean format \
         debug-server debug-client debug-test help
@@ -85,23 +83,23 @@ debug-test:
 # Link executables
 $(BUILD_DIR)/server.out: $(SERVER_OBJS)
 	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 	@echo "Server built: $@"
 
 $(BUILD_DIR)/client.out: $(CLIENT_OBJS)
 	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) $^ -o $@
+	$(CXX) $(CXXFLAGS) $^ -o $@
 	@echo "Client built: $@"
 
 $(BUILD_DIR)/client_tests.out: $(TEST_OBJS)
 	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) $^ -o $@
+	$(CXX) $(CXXFLAGS) $^ -o $@
 	@echo "Tests built: $@"
 
 # Compile object files - now depends on headers too
-$(BUILD_DIR)/%.o: $(SRC_DIR)/%.c $(HEADERS)
+$(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp $(HEADERS)
 	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 # Cleanup
 clean:

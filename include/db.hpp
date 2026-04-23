@@ -2,7 +2,11 @@
 #define DB_H
 
 #include "shared.hpp"
-#include <sqlite3.h>
+
+// C-library 
+extern "C" {
+  #include <sqlite3.h>
+}
 
 /**
  * Initializes sqlite database schema and connection

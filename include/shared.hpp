@@ -1,7 +1,6 @@
 #ifndef SHARED_H
 #define SHARED_H
 
-#define _POSIX_C_SOURCE 200112L
 #include <stdio.h>
 #include <unistd.h>
 #include <ctype.h>
@@ -23,6 +22,10 @@
 #include <algorithm> // string lowercasing algo
 #include <cctype>
 #include <limits> // Required for std::numeric_limits
+#include <string_view>
+
+#include <sstream> // string streams 
+
 
 void private_log_logic(const char* func_name, int line, const char* format, ...);
 #define LOG_ERROR(...) private_log_logic(__func__, __LINE__, __VA_ARGS__)
@@ -50,8 +53,8 @@ typedef struct {
 // Struct representing an existing TCP client
 typedef struct {
   struct sockaddr_storage addr;  // An IPv4 or IPv6 address structure (128 bytes).
-  user_t* user;                  // Pointer to the user associated with the connection; if pointer isn't NULL, this is an authenticated user
-  int fd;                        // Integer containing the file descriptor for the TCP connection socket.
+  user_t* user = nullptr;                  // Pointer to the user associated with the connection; if pointer isn't NULL, this is an authenticated user
+  int fd = -1;                        // Integer containing the file descriptor for the TCP connection socket.
   bool want_read = false;        // Booleans indicating readiness intentions
   bool want_write = false;
   bool want_close = false;
@@ -67,7 +70,7 @@ typedef struct {
  * @param max Maximum valid value.
  * @return The valid integer value that they inputted.
  */
-int get_valid_input_range(char *prompt, int min, int max);
+int get_valid_input_range(std::string_view prompt, int min, int max);
 
 /**
  * Gets keyboard input from stdin.
@@ -108,7 +111,7 @@ void die(const char *msg);
  * @param prompt Input prompt to print before prompting user for input.
  * @param buffer Reference to string buffer that we're going to write input into.
  */
-void get_string_cin(std::string prompt, std::string& buffer);
+void get_string_cin(std::string_view prompt, std::string& buffer);
 
 
 #endif

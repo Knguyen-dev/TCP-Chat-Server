@@ -2,22 +2,69 @@
 #include "server_utils.hpp"
 #include "protocol.hpp"
 #include "db.hpp"
+#include <chrono>
+// #include <format> // requires C++20
 
 
-static std::vector<conn_t *> conn_table;
+// Connection tables
+std::vector<conn_t *> conn_table;
+
+
+// TODO: Optimization for later if we don't have good ideas
+// static int highest_conn_fd;
+// static int highest_authentcated_connfd;
+
+// /**
+//  * Returns the UTC timestamp
+//  * @return A string representing the UTC time, in ISO 8601 format
+//  */
+// std::string get_utc_timestamp() {
+//   auto now = std::chrono::system_clock::now();
+
+//   // %F is equivalent to %Y-%m-%d
+//   // %T is equivalent to %H:%M:%S
+//   // Z is the zone designator for UTC
+//   return std::format("{:%FT%TZ}", std::chrono::floor<std::chrono::seconds>(now));
+//   return s;
+// }
+
+
+/**
+ * Makes a socket associated with a file descriptor nonblocking
+ * @param fd The file descriptor associated with the socket.
+ */
+static void set_nonblocking_fd(int fd) {
+  int flags = fcntl(fd, F_GETFL, 0);
+  if (flags == -1) {
+    fprintf(stderr, "fcntl error: %s\n", strerror(errno));
+    exit(-1);
+  }
+
+  int rc = fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+  if (rc == -1) {
+    fprintf(stderr, "fcntl error: %s\n", strerror(errno));
+    exit(-1);
+  }
+}
 
 // -----------------------------------
 // Connection Table API (Dynamic Array)
 // -----------------------------------
 
 /**
- * Adds an unauthenticated client connection to the connection table
+ * Adds an unauthenticated client connection to the connection table and epoll instance
  * @param fd Fd for the TCP connection socket
  * @param client_address The IP address of the remote peer.
  * @param client_len Number of bytes representing the IP address of the remote peer.
  */
-void add_connection(int fd, struct sockaddr_storage client_address, socklen_t client_len) {
+void add_connection(int epollfd, struct epoll_event& ev, int fd, struct sockaddr_storage client_address, socklen_t client_len) {
   set_nonblocking_fd(fd);
+  
+  // Add conn to epoll instance; they're listening for input, error, and are edge triggered.
+  ev.events = EPOLLIN | EPOLLERR | EPOLLET; 
+  ev.data.fd = fd;
+  epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &ev);
+
   conn_t* conn = new conn_t();
   memcpy(&conn->addr, &client_address, sizeof(client_address));
   conn->user = nullptr;
@@ -36,10 +83,12 @@ void add_connection(int fd, struct sockaddr_storage client_address, socklen_t cl
 }
 
 /**
- * Closes a connection from the TCP server
+ * Closes a connection from the TCP server, updates connection table, removes from epoll instance
  * @param fd The fd for the TCP connection socket
+ * @param ev A epoll event structure used 
  */
-void remove_connection(int fd) {
+void remove_connection(int fd, int epollfd) {
+
   // If authenticated, free malloced user and nullify to prevent dangling pointer
   conn_t* conn = conn_table[fd];
   if (conn->user) {
@@ -47,11 +96,14 @@ void remove_connection(int fd) {
     conn->user = nullptr;
   }
 
-  // TODO: Please nullify the pointer since our event loop code depends on that
-
-  // Zero out the corresponding conn_t struct and close the TCP connection socket
-  *conn = (conn_t){0};
+  // a. Close TCP connection with the client
+  // b. Free the heap memory representing the conn_t struct
+  // c. To prevent referencing a freed pointer, nullify this slot in the array
+  // d. Remove fd from our epoll interest list
   close(fd);
+  delete conn;
+  conn_table[fd] = nullptr;
+  epoll_ctl(epollfd, EPOLL_CTL_DEL, fd, nullptr);  
 }
 
 /**
@@ -68,7 +120,7 @@ static void authenticate_connection(int connfd, user_t& user) {
     LOG_ERROR("malloc() failed in authenticate_connection()\n");
     return;
   }
-  memcpy(new_user, &user, sizeof(user));
+  *new_user = user;
   conn_table[connfd]->user = new_user;
 }
 
@@ -96,7 +148,7 @@ static int register_user(message_t& request) {
   user_t user = {0};
   rc = get_user_by_username(string_to_lower(credentials.username), user);
   if (rc == 1) {
-    fprintf(stderr, "Username '%s' already taken!\n", credentials.username);
+    fprintf(stderr, "Username '%s' already taken!\n", credentials.username.data());
     return RESP_ERROR_USER_EXISTS;
   } else if (rc == -1) {
     LOG_ERROR("get_user_by_username Failed!\n");
@@ -135,16 +187,16 @@ static int login_user(conn_t& conn, message_t& request) {
   rc = get_user_by_username(string_to_lower(credentials.username), user);
   if (rc != 1) {
     if (rc == 0) {
-      fprintf(stdout, "User with username '%s' not found\n", credentials.username);
+      fprintf(stdout, "User with username '%s' not found\n", credentials.username.data());
       return RESP_ERROR_USER_NOT_FOUND;
     } else {
-      LOG_ERROR("get_user_by_username() Failed!\n");
+      fprintf(stderr, "get_user_by_username() Failed!\n");
       return RESP_ERROR_INTERNAL;
     }
   }
 
   if (user.password != credentials.password) {
-    fprintf(stderr, "Invalid password for user '%s'\n", credentials.username);  
+    fprintf(stderr, "Invalid password for user '%s'\n", credentials.username.data());  
     return RESP_ERROR_INVALID_CREDENTIALS;
   }
 
@@ -163,47 +215,30 @@ static int login_user(conn_t& conn, message_t& request) {
 static int handle_broadcast_message(conn_t& conn, message_t& request) {
   tlv_tag_t broadcast_tag = peek_broadcast_type(request);
   switch (broadcast_tag) {
-    case TAG_WORLD_BROADCAST: {
+    case TAG_WORLD_BROADCAST: {      
+      // Parse request and build world broadcast; write the response message into a buffer
       world_broadcast_t broadcast = {0};
       message_t response = {0};
       if (parse_world_broadcast(request, broadcast) != 0) {
         return RESP_ERROR_INTERNAL;
       }
       build_world_broadcast_notification(response, broadcast);
+      std::vector<uint8_t> serialized_response;
+      write_message_to_buffer(serialized_response, response);
 
+      // Write serialized response data into all valid buffers
       for (size_t i = 0; i < conn_table.size(); i++) {
-        // If connection is closed OR not authenticated OR is the client sending the broadcast, skip it.
-        if (conn_table[i] == nullptr || conn_table[i]->user == nullptr || i == (size_t)conn.fd) {
+        // If looking at the sender, connection slot is closed, or user isn't authentcated, then SKIP
+        if (i == (size_t)conn.fd || conn_table[i] == nullptr || conn_table[i]->user == nullptr) {
           continue;
         }
-
-
-        
-
-        // TODO: fix this
-        // std::vector<uint8_t> serialized_msg = response.serialize(); // or however you convert msg to bytes
-
-        /*
-        TODO: I don't know the solution
-        - Trying to response the broadcast message into the outgoing buffer of each remote peer struct 
-          could be quite inefficient. But the main issue would be, what if those outgoing buffers already have partial
-          messages that haven't been sent. For example, let's focus on one remote peer connection C.
-            1. Peer A sends a broadcast M1, and we write 75% of M1 into C's outgoing buffer.
-            2. Peer B sends broadcast M2, about 0.10 seconds later, and then now 25% of M2 is written into C's outgoing buffer,
-              right after the byte stream of M2.
-
-        At this point, this buffer isn't valid. The main goal now is that we want to maintain this zero-copy efficiency
-        of sending data into an outgoing buffer, whilst having data integrity. Maybe we have to have some locking mechanism
-        , extra state, or maybe there's some other approaches out there that we haven't seen yet. 
-        */
-        
-
-
-
+        std::vector<uint8_t>& output_buffer = conn_table[i]->outgoing;
+        output_buffer.insert(output_buffer.end(), serialized_response.begin(), serialized_response.end());
       }
       break;
     }
     case TAG_P2P_BROADCAST: {
+      // Parse P2P broadcast request and build broadcast 
       p2p_broadcast_t broadcast = {0};
       message_t response = {0};
       if (parse_p2p_broadcast(request, broadcast) != 0) {
@@ -211,24 +246,27 @@ static int handle_broadcast_message(conn_t& conn, message_t& request) {
       }
       build_p2p_broadcast_notification(response, broadcast);
 
-      // Search for recipient connection
-      int recipient_connfd = -1;
-      for (int i = 0; i < conn_table.capacity; i++) {
-        conn_t conn = conn_table.items[i];
-        if (conn.user == NULL || i == connfd) {
+      // Search for recipient connection in the table
+      conn_t* recipient_conn = nullptr;
+      for (size_t i = 0; i < conn_table.capacity(); i++) {
+        // If looking at the sender, connection slot is closed, or user isn't authentcated, then SKIP
+        if (i == (size_t)conn.fd || conn_table[i] == nullptr || conn_table[i]->user == nullptr) {
           continue;
         }
-        if (strcmp(conn.user->username, broadcast.recipient_username) != 0) {
-          continue;
+        if (conn.user->username == broadcast.recipient_username) {
+          recipient_conn = conn_table[i];
+          break;
         }
-        recipient_connfd = i;
-        break;
       }
-    
-      if (recipient_connfd == -1) {
+      if (recipient_conn == nullptr) {
         return RESP_ERROR_USER_NOT_FOUND;
       }
-      write_one_message(recipient_connfd, &response);
+      
+      // Get serialized response and write it to the output buffer
+      std::vector<uint8_t> serialized_response;
+      write_message_to_buffer(serialized_response, response);
+      std::vector<uint8_t>& output_buffer = recipient_conn->outgoing;
+      output_buffer.insert(output_buffer.end(), serialized_response.begin(), serialized_response.end());
       break;
     }
     default:
@@ -241,43 +279,6 @@ static int handle_broadcast_message(conn_t& conn, message_t& request) {
 // --------------------------------------
 // Event Loop Utils and API
 // --------------------------------------
-
-/**
- * Makes a socket associated with a file descriptor nonblocking
- * @param fd The file descriptor associated with the socket.
- */
-static void set_nonblocking_fd(int fd) {
-  int flags = fcntl(fd, F_GETFL, 0);
-  if (flags == -1) {
-    fprintf(stderr, "fcntl error: %s\n", strerror(errno));
-    exit(-1);
-  }
-
-  int rc = fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-  if (rc == -1) {
-    fprintf(stderr, "fcntl error: %s\n", strerror(errno));
-    exit(-1);
-  }
-}
-
-/**
- * Append bytes to the back of a given buffer
- * @param buf Reference variable to the buffer we're appending data into.
- * @param data Pointer to the a buffer we'll read data from and copy into said buffer.
- * @param len Number of bytes we're copying from data into buf.
- */
-static void buf_append(std::vector<uint8_t> &buf, const uint8_t *data, size_t len) {
-    buf.insert(buf.end(), data, data + len);
-}
-
-/**
- * Remove data from the start of the buffer
- * @param buf Reference to the buffer that we're erasing data from.
- * @param n Number of bytes we want to remove from the start of the buffer.
- */
-static void buf_consume(std::vector<uint8_t> &buf, size_t n) {
-    buf.erase(buf.begin(), buf.begin() + n);
-}
 
 /**
  * Attempts to serve one request message for the given connection
@@ -306,71 +307,87 @@ static bool try_one_request(conn_t& conn) {
   int result;
   switch (message.type) {
     case REGISTER:
-      // TODO: Place replace usage of extra_data buffer and extra_data_len
-      // with the conn_t::outgoing vector. I think with our FSM, we wouldn't be be currently
-      // reading data if we already had data to write. But verify this.
-      register_user(message);
+      result = register_user(message);
       break;
     case LOGIN:
-      login_user(conn, message);
+      result = login_user(conn, message);
       break;
     case CHAT:
-      result = handle_broadcast_message(connfd, &request, extra_data, &extra_data_len);
+      result = handle_broadcast_message(conn, message);
       break;
     default:
       fprintf(stderr, "Received unknown message type '%d'!\n", message.type);
       result = RESP_ERROR_UNKNOWN_COMMAND;
   }
 
-
-  // TODO: Build server response/ACK for the client.  
-  // Write the response message into the outgoing buffer, which will the state change to writing
+  message_t response = build_server_response(static_cast<response_code_t>(result), NULL, 0);
+  write_message_to_buffer(conn.outgoing, response);
+  return true;
+  
 }
 
-void handle_read_connection(conn_t* conn) {
+void handle_read_connection(conn_t& conn) {
   uint8_t buffer[64 * 1024];
-  ssize_t rv = read(conn->fd, buffer, sizeof(buffer));
-  if (rv < 0) {
-    // No more data, early return.
-    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+
+  while (true) {
+    ssize_t rv = read(conn.fd, buffer, sizeof(buffer));
+    if (rv < 0) {
+      // Buffer is fully drained; we can safely stop and wait for next ET notification
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        break;
+      }
+
+      // Otherwise, we had an actual read() error, return to main loop for termination.
+      fprintf(stderr, "read() error: %s\n", strerror(errno));
+      conn.want_close = true;
+      return;
+    } else if (rv == 0) {
+      if (conn.incoming.size() == 0) {
+        fprintf(stderr, "Remote peer closed the connection!\n");
+      } else {
+        fprintf(stderr, "Remote peer unexpected EOF!\n");
+      }
+      conn.want_close = true;
       return;
     }
 
-    // Otherwise, we had an actual read() error 
-    fprintf(stderr, "read() error: %s\n", strerror(errno));
-    conn->want_close = true;
-    return;
-  } else if (rv == 0) {
-    if (conn->incoming.size() == 0) {
-      msg("Remote peer closed the connection!");
-    } else {
-      msg("Remote peer unexpected EOF!");
-    }
-    conn->want_close = true;
-    return;
+    // Append data to the end of the incoming buffer
+    conn.incoming.insert(conn.incoming.end(), buffer, buffer+rv);
   }
 
-  
-  // Write data into incoming buffer. 
-  buf_append(conn->incoming, buffer, rv);
-
-  // TODO: Later see and verify pipelining
-  try_one_request(conn);
+  // Process as many requests as possible; pipelining
+  while (try_one_request(conn)) {};
 
   // If we have outgoing messages to send (due to successfully parsing a request message), 
   // then update the state machine to indicate that we want to write to the socket.
-  if (conn->outgoing.size() > 0) {
-    conn->want_read = false;
-    conn->want_write = true;
+  if (conn.outgoing.size() > 0) {
+    conn.want_read = false;
+    conn.want_write = true;
   }
 }
 
-// TODO: Implement this
-void handle_write_connection(conn_t* conn) {
+void handle_write_connection(conn_t& conn) {
+  while (true) {
+    ssize_t rv = write(conn.fd, &conn.outgoing[0], conn.outgoing.size());
+    if (rv < 0) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        return; 
+      }
+      // Otherwise an actual error happened.
+      fprintf(stderr, "write() error. Closing connection '%d'\n", conn.fd);
+      conn.want_close = true;
+      return;
+    }
 
+    buf_consume(conn.outgoing, (size_t)rv);
+    if (conn.outgoing.size() == 0) {
+      conn.want_read = true;
+      conn.want_write = false;
+    }
+  }
 }
 
-void accept_all_connections(int listenfd) {
+void accept_all_connections(int listenfd, int epollfd, struct epoll_event& ev) {
   socklen_t client_len;
   struct sockaddr_storage client_address;
   while (true) {
@@ -379,6 +396,8 @@ void accept_all_connections(int listenfd) {
     if (conn_fd < 0) {
 
       // If blocking, then no connections are left in the kernel, exit
+      // NOTE: Accepting one connection at a time, and there could be multiple requests
+      // which is why we're in a while loop
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
         return;
       }
@@ -387,9 +406,9 @@ void accept_all_connections(int listenfd) {
       fprintf(stderr, "accept() error: %s", strerror(errno));
       exit(-1);
     }
-
-    // Add client connection to the connection table
-    add_connection(conn_fd, client_address, client_len);
+    
+    // Add client connection to epoll instance and connection table
+    add_connection(epollfd, ev, conn_fd, client_address, client_len);
   }
 }
 

@@ -2,6 +2,8 @@
 #define SERVER_UTILS_H
 #include "shared.hpp"
 
+#include <sys/epoll.h> // for epoll readiness API
+
 #define LISTENQ 100
 #define MAX_EVENTS 64
 
@@ -11,6 +13,9 @@
 // handle_read_connection()
 // handle_write_connection()
 
+// Connection table; 
+extern std::vector<conn_t*> conn_table;
+
 /**
  * Handles reading data from and serving the connection
  * @param conn Connection that we're reading data from and serving
@@ -19,28 +24,31 @@
  * connection into write mode so that we can write a response message corresponding 
  * to the request message that we processed. 
  */
-void handle_read_connection(conn_t* conn);
+void handle_read_connection(conn_t& conn);
 
 /**
  * Handles writing data to the remote peer
+ * @param conn Connection that we're writing data into.
  */
-void handle_write_connection(conn_t* conn);
+void handle_write_connection(conn_t& conn);
 
 /**
  * Closes a connection from the TCP server
  * @param fd The fd for the TCP connection socket
+ * @param epollfd FD of the epoll instance
  */
-void remove_connection(int fd);
+void remove_connection(int fd, int epollfd);
 
 /**
  * Handles accepting all incoming TCP connection possible
  * @param listenfd File descriptor for the listening socket.
- * @return Pointer to dynamically allocated memory that stores the conn_t struct representing the connection.
+ * @param epollfd File descriptor for the epoll instance
+ * @param ev Epoll event struct that we'll reuse for registration.
  * 
  * NOTE: This function will accept connections until it empties out the kernel-side buffer 
  * of TCP connection requests are depleted (until EAGAIN or EWOULDBLOCK).
  */
-void accept_all_connections(int listenfd);
+void accept_all_connections(int listenfd, int epollfd, struct epoll_event& ev);
 
 /**
  * Initializes and starts the server at some port 
@@ -48,19 +56,5 @@ void accept_all_connections(int listenfd);
  * @return Descriptor for the server's listening socket on success, otherwise -1 on error.
  */
 int init_server(char* port);
-
-
-
-// TODO: Serve connection might be removed
-/**
- * Thread routine that has an infinite server loop.
- * 
- * @param vargp A pointer to the connfd for the thread
- * 
- * NOTE: This is the thread routine that each thread uses to serve a client.
- * We want to maintain the connection until the user disconnects, so 
- * we're probably going to run a while loop
- */
-void *serve_connection(void *vargp);
 
 #endif

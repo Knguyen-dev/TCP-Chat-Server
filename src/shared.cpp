@@ -33,11 +33,11 @@ void log_message(const char *prefix, const char *msg) {
     fclose(f);
 }
 
-int get_valid_input_range(char *prompt, int min, int max) {
+int get_valid_input_range(std::string_view prompt, int min, int max) {
   int value;
   int status;
   while (1) {
-    printf("%s", prompt);
+    std::cout << prompt;
     status = scanf("%d", &value);
     
     // 1. Handle non-numeric input
@@ -94,10 +94,7 @@ void ignore_line() {
   std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
 }
 
-/**
- * Safely get input
- */
-void get_string_cin(std::string prompt, std::string& buffer) {
+void get_string_cin(std::string_view prompt, std::string& buffer) {
   while (true) {
     std::cout << prompt;
     std::cin >> buffer;
