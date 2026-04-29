@@ -4,9 +4,6 @@
 #define MSG_HEADER_SIZE 7 // max header size in bytes
 #define MSG_MAX_PAYLOAD_SIZE 4096 // max payload size in bytes
 
-// Response messages corresponding with response codes 
-extern const std::string response_messages[];
-
 // Struct representing a message being transferred between client and server
 typedef struct {
   uint32_t payload_length; // Size of the message payload in host byte order.
@@ -15,7 +12,6 @@ typedef struct {
   uint8_t rc;              // Response code, assuming type = ACK (the message represents a server response)
   uint8_t* payload;        // Pointer to the start of the message's body/payload
 } message_t;
-
 
 /**
  * Message Types for the Global Header.
@@ -60,8 +56,7 @@ typedef enum {
   TAG_RECIPIENT_USERNAME = 10,
   TAG_MESSAGE_CONTENT = 11,
 
-  // TODO: Use the timestamp to represenet when the user got the 
-  // message
+  // TODO: Timestamps could be a future feature
   TAG_TIMESTAMP = 12
 } tlv_tag_t;
 
@@ -85,7 +80,6 @@ typedef struct {
   std::string recipient_username;
   std::string message_content;
 } p2p_broadcast_t;
-
 
 /**
  * Gets the response message string asscoiated with a response code
@@ -128,29 +122,38 @@ void parse_message(const std::vector<uint8_t>& buffer, message_t& message);
  * @param buffer Buffer that we're appending data to the end to. This represents the conn_t::outgoing buffer
  * @param message Message that we're serializing and writing into the buffer.
  * 
- * NOTE: This function has been designed with server-side use in mind. ATP 
+ * @note This function has been designed with server-side use in mind. ATP 
  * we're writing into the conn_t::outgoing buffer. The request message should 
  * have everything set already, we only need to deal with writing bytes, endian-ness
- * etc. This operation should ont be interrupted.
+ * etc. This operation appends the bytes to the end of the buffer. This operation should ont be interrupted.
  */
 void write_message_to_buffer(std::vector<uint8_t>& buffer, message_t& message);
 
 /**
  * Performs a blocking read to get one full message from the remote peer.
- * @param conn Connection that we're going to be reading from and appending data to the conn_t::incoming.
+ * @param conn Connection that read from and appending data to the conn_t::incoming.
  * @param msg Message struct that'll be populated which'll contain readable information about the processed message.
  * @return 0 on success, otherwise -1.
+ * 
+ * @note Appends the full message to conn_t::incoming and parses 
+ * the important header fields and pointer to the payload into 
+ * the msg object. The pointer to the payload points to inside the conn_t::incoming 
+ * buffer.
  */
 int read_one_message(conn_t& conn, message_t& msg);
 
 /**
  * Performs a blocking write to write one full message from the conn_t::outgoing into the socket
- * @param conn Connection that we're going to write to.
+ * @param conn Connection that we're going to write from.
  * @param msg The response message that we're writing to the remote peer
+ * @return Number of bytes written on success, otherwise -1 on failure.
+ * @note This assumes that you have a full message already serialized in conn_t::outgoing 
+ * buffer. It'll write the message from that and remove the emssage from the buffer after 
+ * to keep things clean. The `msg` representing the more 'human-readable' request is needed 
+ * for some metadata!
  * 
- * NOTE: This is kind of jank because like you're reading the bytes from 
- * the message object's payload pointer, which points to the conn_t::outgoing dynamic
- * vector. And then you update the dynamic vector to erase the data we've written.
+ * This is going to be used by the client for a typical request-response cycle.
+ * The server has its own non-blocking version that fits its architecture.
  */
 int write_one_message(conn_t& conn, message_t& msg);
 

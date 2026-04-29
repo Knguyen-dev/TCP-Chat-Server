@@ -1,33 +1,13 @@
 #include "shared.hpp"
 #include "server_utils.hpp"
 #include "protocol.hpp"
+#include "logger.hpp"
 #include "db.hpp"
 #include <chrono>
 // #include <format> // requires C++20
 
-
 // Connection tables
 std::vector<conn_t *> conn_table;
-
-
-// TODO: Optimization for later if we don't have good ideas
-// static int highest_conn_fd;
-// static int highest_authentcated_connfd;
-
-// /**
-//  * Returns the UTC timestamp
-//  * @return A string representing the UTC time, in ISO 8601 format
-//  */
-// std::string get_utc_timestamp() {
-//   auto now = std::chrono::system_clock::now();
-
-//   // %F is equivalent to %Y-%m-%d
-//   // %T is equivalent to %H:%M:%S
-//   // Z is the zone designator for UTC
-//   return std::format("{:%FT%TZ}", std::chrono::floor<std::chrono::seconds>(now));
-//   return s;
-// }
-
 
 /**
  * Makes a socket associated with a file descriptor nonblocking
@@ -36,35 +16,74 @@ std::vector<conn_t *> conn_table;
 static void set_nonblocking_fd(int fd) {
   int flags = fcntl(fd, F_GETFL, 0);
   if (flags == -1) {
-    fprintf(stderr, "fcntl error: %s\n", strerror(errno));
+    LOG_ERROR("fcntl error: %s\n", strerror(errno));
     exit(-1);
   }
 
   int rc = fcntl(fd, F_SETFL, flags | O_NONBLOCK);
   if (rc == -1) {
-    fprintf(stderr, "fcntl error: %s\n", strerror(errno));
+    LOG_ERROR("fcntl error: %s\n", strerror(errno));
     exit(-1);
+  }
+}
+
+
+/**
+ * Updates the state of an existing connection.
+ * @param epollfd File descriptor for the epoll instance that our application is using.
+ * @param conn Connection object whose state we're updating. The fd must be an existing fd in the epoll interest list.
+ * @param state The state we're updating the connection to reflect.
+ * @note Updates application state, like the want_read or want_write, but also updates the 
+ * epoll's interest list to reflect the TCP 's I/O readiness.
+ * @note For closing a connection, we literally set conn_t::want_close to true, which 
+ * will make the connection be processed through the event loop and eventaully end up in
+ * remove_connection.
+ */
+static void set_connection_state(int epollfd, conn_t& conn, bool is_read) {
+  if (is_read) {
+    conn.want_read = true;
+    conn.want_write = false;
+    struct epoll_event ev;
+    ev.events = EPOLLIN | EPOLLET;
+    ev.data.fd = conn.fd;  
+    if (epoll_ctl(epollfd, EPOLL_CTL_MOD, conn.fd, &ev) == -1) {
+      LOG_ERROR("epoll_ctl failure: %s\n", strerror(errno));
+    }
+  } else {
+    conn.want_read = false;
+    conn.want_write = true;
+    struct epoll_event ev;
+    ev.events = EPOLLOUT | EPOLLET;
+    ev.data.fd = conn.fd;  
+    if (epoll_ctl(epollfd, EPOLL_CTL_MOD, conn.fd, &ev) == -1) {
+      LOG_ERROR("epoll_ctl failure: %s\n", strerror(errno));
+    } 
   }
 }
 
 // -----------------------------------
 // Connection Table API (Dynamic Array)
 // -----------------------------------
-
 /**
  * Adds an unauthenticated client connection to the connection table and epoll instance
  * @param fd Fd for the TCP connection socket
  * @param client_address The IP address of the remote peer.
  * @param client_len Number of bytes representing the IP address of the remote peer.
  */
-void add_connection(int epollfd, struct epoll_event& ev, int fd, struct sockaddr_storage client_address, socklen_t client_len) {
+void add_connection(int epollfd, int fd, struct sockaddr_storage client_address, socklen_t client_len) {
   set_nonblocking_fd(fd);
   
-  // Add conn to epoll instance; they're listening for input, error, and are edge triggered.
-  ev.events = EPOLLIN | EPOLLERR | EPOLLET; 
+  // Add TCP fd in the interest list; reading and edge-triggered
+  struct epoll_event ev;
+  ev.events = EPOLLIN | EPOLLET; 
   ev.data.fd = fd;
-  epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &ev);
+  int rc = epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &ev);
+  if (rc == -1) {
+    LOG_ERROR("epoll_ctl error: %s\n", strerror(errno));
+    return;
+  }
 
+  // Create new connection socket that starts off reading as well.
   conn_t* conn = new conn_t();
   memcpy(&conn->addr, &client_address, sizeof(client_address));
   conn->user = nullptr;
@@ -85,7 +104,7 @@ void add_connection(int epollfd, struct epoll_event& ev, int fd, struct sockaddr
 /**
  * Closes a connection from the TCP server, updates connection table, removes from epoll instance
  * @param fd The fd for the TCP connection socket
- * @param ev A epoll event structure used 
+ * @param epollfd The fd for the epoll instance.
  */
 void remove_connection(int fd, int epollfd) {
 
@@ -99,11 +118,11 @@ void remove_connection(int fd, int epollfd) {
   // a. Close TCP connection with the client
   // b. Free the heap memory representing the conn_t struct
   // c. To prevent referencing a freed pointer, nullify this slot in the array
-  // d. Remove fd from our epoll interest list
+  // d. Remove the TCP connection socket's fd from the interest list.
   close(fd);
   delete conn;
   conn_table[fd] = nullptr;
-  epoll_ctl(epollfd, EPOLL_CTL_DEL, fd, nullptr);  
+  epoll_ctl(epollfd, EPOLL_CTL_DEL, fd, nullptr);
 }
 
 /**
@@ -135,7 +154,7 @@ static void authenticate_connection(int connfd, user_t& user) {
  * @return 0 if success, otherwise an error response code.
  */
 static int register_user(message_t& request) {
-  registration_credentials_t credentials = {0};
+  registration_credentials_t credentials = {};
   int rc = parse_register_request(request, credentials);
   if (rc != 0) {
     return rc;
@@ -145,10 +164,10 @@ static int register_user(message_t& request) {
   // NOTE: This approach preserves the casing of the usernames, but enforces 
   // case-insensitive uniqueness. So 'Alice' and 'alice' are considered the same username, and 
   // if 'Alice' is registered first, then 'alice' will be rejected as a registration username.
-  user_t user = {0};
+  user_t user{};
   rc = get_user_by_username(string_to_lower(credentials.username), user);
   if (rc == 1) {
-    fprintf(stderr, "Username '%s' already taken!\n", credentials.username.data());
+    LOG_DEBUG("Username '%s' already taken!\n", credentials.username.data());
     return RESP_ERROR_USER_EXISTS;
   } else if (rc == -1) {
     LOG_ERROR("get_user_by_username Failed!\n");
@@ -156,7 +175,7 @@ static int register_user(message_t& request) {
   }
 
   // Insert new user in the database
-  user_t new_user = {0};
+  user_t new_user{};
   new_user.id = 0; 
   new_user.username = credentials.username;
   new_user.password = credentials.password;
@@ -176,27 +195,27 @@ static int register_user(message_t& request) {
  * @return 0 on success, otherwise a response code.
  */
 static int login_user(conn_t& conn, message_t& request) {
-  login_credentials_t credentials = {0};
+  login_credentials_t credentials{};
   int rc = parse_login_request(request, credentials);
   if (rc != 0) {
     return rc;
   }
   
   // Does username exist in db?
-  user_t user = {0};
+  user_t user{};
   rc = get_user_by_username(string_to_lower(credentials.username), user);
   if (rc != 1) {
     if (rc == 0) {
-      fprintf(stdout, "User with username '%s' not found\n", credentials.username.data());
+      LOG_DEBUG("User with username '%s' not found\n", credentials.username.data());
       return RESP_ERROR_USER_NOT_FOUND;
     } else {
-      fprintf(stderr, "get_user_by_username() Failed!\n");
+      LOG_ERROR("get_user_by_username() Failed!\n");
       return RESP_ERROR_INTERNAL;
     }
   }
 
   if (user.password != credentials.password) {
-    fprintf(stderr, "Invalid password for user '%s'\n", credentials.username.data());  
+    LOG_DEBUG("Invalid password for user '%s'\n", credentials.username.data());
     return RESP_ERROR_INVALID_CREDENTIALS;
   }
 
@@ -217,8 +236,8 @@ static int handle_broadcast_message(conn_t& conn, message_t& request) {
   switch (broadcast_tag) {
     case TAG_WORLD_BROADCAST: {      
       // Parse request and build world broadcast; write the response message into a buffer
-      world_broadcast_t broadcast = {0};
-      message_t response = {0};
+      world_broadcast_t broadcast{};
+      message_t response{};
       if (parse_world_broadcast(request, broadcast) != 0) {
         return RESP_ERROR_INTERNAL;
       }
@@ -239,8 +258,8 @@ static int handle_broadcast_message(conn_t& conn, message_t& request) {
     }
     case TAG_P2P_BROADCAST: {
       // Parse P2P broadcast request and build broadcast 
-      p2p_broadcast_t broadcast = {0};
-      message_t response = {0};
+      p2p_broadcast_t broadcast{};
+      message_t response{};
       if (parse_p2p_broadcast(request, broadcast) != 0) {
         return RESP_ERROR_INTERNAL;
       }
@@ -270,7 +289,7 @@ static int handle_broadcast_message(conn_t& conn, message_t& request) {
       break;
     }
     default:
-      fprintf(stderr, "Received unknown broadcast tag '%d'. Skipping request!\n", broadcast_tag);
+      LOG_WARN("Received unknown broadcast tag '%d'. Skipping request!\n", broadcast_tag);
   }
 
   return RESP_OK;
@@ -291,14 +310,15 @@ static bool try_one_request(conn_t& conn) {
     return false;
   }
 
+  // NOTE: At this point you knwo that message_t::payload points somewhere in conn_t::incoming
   message_t message;
   parse_message(conn.incoming, message);
   if (message.payload_length > MSG_MAX_PAYLOAD_SIZE) {
-    fprintf(stderr, "Message payload size was too big. Closing connection!\n");
+    LOG_ERROR("Message payload size was too big. Closing connection!\n");
     conn.want_close = true;
     return false;
   }
-
+  
   // Don't proceed if we don't have at least a full message worth of data.
   if (MSG_HEADER_SIZE + message.payload_length > conn.incoming.size()) {
     return false;
@@ -316,17 +336,21 @@ static bool try_one_request(conn_t& conn) {
       result = handle_broadcast_message(conn, message);
       break;
     default:
-      fprintf(stderr, "Received unknown message type '%d'!\n", message.type);
+      LOG_WARN("Received unknown message type '%d'!\n", message.type);
       result = RESP_ERROR_UNKNOWN_COMMAND;
   }
 
+  // At this point, we have successfully processed the message request.
+  // We can erase the request message data from the conn_t::incoming buffer
+  buf_consume(conn.incoming, MSG_HEADER_SIZE+message.payload_length);
+  
+  // ATP the entire response message has been 
   message_t response = build_server_response(static_cast<response_code_t>(result), NULL, 0);
   write_message_to_buffer(conn.outgoing, response);
-  return true;
-  
+  return true; 
 }
 
-void handle_read_connection(conn_t& conn) {
+void handle_read_connection(conn_t& conn, int epollfd) {
   uint8_t buffer[64 * 1024];
 
   while (true) {
@@ -337,36 +361,42 @@ void handle_read_connection(conn_t& conn) {
         break;
       }
 
-      // Otherwise, we had an actual read() error, return to main loop for termination.
-      fprintf(stderr, "read() error: %s\n", strerror(errno));
+      // Otherwise, we had an actual read() error, close connection
+      LOG_ERROR("read() error: %s\n", strerror(errno));
       conn.want_close = true;
       return;
     } else if (rv == 0) {
       if (conn.incoming.size() == 0) {
-        fprintf(stderr, "Remote peer closed the connection!\n");
+        if (conn.user) {
+          LOG_DEBUG("Remote Peer (fd=%d, username=%s) disconnected!\n", conn.fd, conn.user->username.data());
+        } else {
+          LOG_DEBUG("Remote Peer (fd=%d) disconnected!\n", conn.fd);
+        }
       } else {
-        fprintf(stderr, "Remote peer unexpected EOF!\n");
+        LOG_DEBUG("Remote Peer (fd=%d) unexpected EOF!\n", conn.fd);
       }
       conn.want_close = true;
       return;
     }
-
-    // Append data to the end of the incoming buffer
-    conn.incoming.insert(conn.incoming.end(), buffer, buffer+rv);
+    buf_append(conn.incoming, buffer, rv);
   }
 
-  // Process as many requests as possible; pipelining
+  // ### ASIDE: Core State Machine Logic ###
+  // 1. Append bytes to the end of conn_t::incoming in handle_read_connection.
+  // 2. Erase bytes from the start of conn_t::incoming in try_one_request.
+  // 3. Append bytes to the end of conn_t::outgoing  in try_one_request
+  // 4. Erase bytes from the start of conn_t::outgoing in handle_write_connection
+  // NOTE: while loop means if we read multiple requests, then we'll try to process multiple (request pipelining).
   while (try_one_request(conn)) {};
 
   // If we have outgoing messages to send (due to successfully parsing a request message), 
   // then update the state machine to indicate that we want to write to the socket.
   if (conn.outgoing.size() > 0) {
-    conn.want_read = false;
-    conn.want_write = true;
+    set_connection_state(epollfd, conn, false);
   }
 }
 
-void handle_write_connection(conn_t& conn) {
+void handle_write_connection(conn_t& conn, int epollfd) {
   while (true) {
     ssize_t rv = write(conn.fd, &conn.outgoing[0], conn.outgoing.size());
     if (rv < 0) {
@@ -374,20 +404,19 @@ void handle_write_connection(conn_t& conn) {
         return; 
       }
       // Otherwise an actual error happened.
-      fprintf(stderr, "write() error. Closing connection '%d'\n", conn.fd);
+      LOG_ERROR("write() error. Closing connection '%d'\n", conn.fd);
       conn.want_close = true;
       return;
     }
 
     buf_consume(conn.outgoing, (size_t)rv);
     if (conn.outgoing.size() == 0) {
-      conn.want_read = true;
-      conn.want_write = false;
+      set_connection_state(epollfd, conn, true);
     }
   }
 }
 
-void accept_all_connections(int listenfd, int epollfd, struct epoll_event& ev) {
+void accept_all_connections(int listenfd, int epollfd) {
   socklen_t client_len;
   struct sockaddr_storage client_address;
   while (true) {
@@ -403,12 +432,16 @@ void accept_all_connections(int listenfd, int epollfd, struct epoll_event& ev) {
       }
       
       // Otherwise, we had a real accept() error
-      fprintf(stderr, "accept() error: %s", strerror(errno));
+      LOG_ERROR("accept() error: %s", strerror(errno));
       exit(-1);
     }
     
     // Add client connection to epoll instance and connection table
-    add_connection(epollfd, ev, conn_fd, client_address, client_len);
+    add_connection(epollfd, conn_fd, client_address, client_len);
+
+
+
+    LOG_DEBUG("Client connected (fd=%d)\n", conn_fd);
   }
 }
 
@@ -441,7 +474,7 @@ int open_listenfd(char *port) {
   hints.ai_flags |= AI_NUMERICSERV;
   return_code = getaddrinfo(NULL, port, &hints, &listp);
   if (return_code != 0) {
-    fprintf(stderr, "Getaddrinfo Error: %s\n", gai_strerror(return_code));
+    LOG_ERROR("Getaddrinfo Error: %s\n", gai_strerror(return_code));
     return -1;
   }
 
@@ -476,20 +509,21 @@ int open_listenfd(char *port) {
     }
     
     if (close(listenfd) < 0) {
-      fprintf(stderr, "open_listenfd close error: %s\n", strerror(errno));
+
+      LOG_ERROR("open_listenfd close error: %s\n", strerror(errno));
       return -1;
     }
   }
 
   freeaddrinfo(listp);
   if (!p) {
-    fprintf(stderr, "open_listenfd error: No suitable addresses found!\n");
+    LOG_ERROR("open_listenfd error: No suitable addresses found!\n");
     return -1;
   }
 
   set_nonblocking_fd(listenfd);
   if (listen(listenfd, LISTENQ) < 0) {
-    fprintf(stderr, "open_listenfd listen error: Error opening the listening socket!\n");
+    LOG_ERROR("open_listenfd listen error: Error opening the listening socket!\n");
     close(listenfd);
     return -1;
   }

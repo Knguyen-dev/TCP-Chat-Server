@@ -1,4 +1,6 @@
 #include "protocol.hpp"
+#include "logger.hpp"
+
 
 std::string get_response_message(response_code_t code) {
   switch (code) {
@@ -9,6 +11,7 @@ std::string get_response_message(response_code_t code) {
     case RESP_ERROR_INVALID_CREDENTIALS: return "Invalid credentials";
     case RESP_ERROR_INTERNAL: return "Internal server error";
     case RESP_ERROR_UNKNOWN_COMMAND: return "Unknown command";
+    default: return "Unknown response code (" + std::to_string(static_cast<int>(code)) + ")";
   }
   std::stringstream ss;
   ss << "Unknown response code: " << code << "!";
@@ -86,7 +89,7 @@ int read_one_message(conn_t& conn, message_t& msg) {
   while (bytes_to_read > 0) {
     int bytes_read = read(conn.fd, ptr, bytes_to_read);
     if (bytes_read == 0) {
-      fprintf(stderr, "EOF when reading msg header. Remote peer closed!\n");
+      LOG_ERROR("EOF when reading msg header. Remote peer closed!\n");
       return -1;
     }
 
@@ -96,7 +99,7 @@ int read_one_message(conn_t& conn, message_t& msg) {
     }
 
     if (bytes_read == -1) {
-      fprintf(stderr, "read error when reading msg header: %s\n", strerror(errno));
+      LOG_ERROR("read error when reading msg header: %s\n", strerror(errno));
       return -1;
     }
     ptr += bytes_read;
@@ -113,23 +116,23 @@ int read_one_message(conn_t& conn, message_t& msg) {
   memcpy(&msg.payload_length, buffer+3, sizeof(msg.payload_length));
   msg.payload_length = ntohl(msg.payload_length);
   if (msg.payload_length > MSG_MAX_PAYLOAD_SIZE) {
-    fprintf(stderr, "read_one_message: Payload of size '%d' is bigger than maximum!\n", msg.payload_length);
+    LOG_ERROR("Payload of size '%d' is bigger than maximum!\n", msg.payload_length);
     return -1;
   }
 
   // ##### Step 3: Read the message payload from peer #####
-  // NOTE: Resets pointer to point at the start of the buffer, which will probably overwite 
+  // NOTE: Resets pointer to point at the start of the buffer, which will probably overwrite 
   // those 7 header bytes which is fine because those bytes have already been saved into conn_t::incoming
   bytes_to_read = msg.payload_length;
   ptr = &buffer[0];
   while (bytes_to_read > 0) {
     int bytes_read = read(conn.fd, ptr, bytes_to_read);
     if (bytes_read == 0) {
-      fprintf(stderr, "Unexpected EOF when reading msg payload!\n");
+      LOG_ERROR("Unexpected EOF when reading msg payload!\n");
       return -1;
     }
     if (bytes_read == -1) {
-      fprintf(stderr, "read error when reading msg payload: %s\n", strerror(errno));
+      LOG_ERROR("read error when reading msg payload: %s\n", strerror(errno));
       return -1;
     }    
     ptr += bytes_read;
@@ -162,7 +165,7 @@ int write_one_message(conn_t& conn, message_t& msg) {
       }
         
       // Otherwise an actual error or remote connection closed.
-      fprintf(stderr, "Failed to write one message with errno '%s'\n", strerror(errno));
+      LOG_ERROR("Failed to write one message with errno '%s'\n", strerror(errno));
       return -1;
     }
     ptr += res;
@@ -429,8 +432,7 @@ int parse_world_broadcast(message_t& request, world_broadcast_t& broadcast) {
         has_content = 1;
         break;
       default:
-        // Unknown tag so skip it
-        fprintf(stderr, "Unknown TLV tag '%d', skipping %d bytes\n", tag, num_bytes);
+        LOG_WARN("Unknown TLV tag '%d', skipping %d bytes\n", tag, num_bytes);
     }
     payload_ptr += num_bytes;
   }
@@ -486,7 +488,7 @@ int parse_p2p_broadcast(message_t& request, p2p_broadcast_t& broadcast) {
 
   while (payload_ptr < payload_end) {
     if (payload_ptr + 2 > payload_end) {
-      fprintf(stderr, "Malformed TLV: incomplete header\n");
+      LOG_ERROR("Malformed TLV: incomplete header\n");
       return RESP_ERROR_MALFORMED;
     }
 
@@ -494,7 +496,7 @@ int parse_p2p_broadcast(message_t& request, p2p_broadcast_t& broadcast) {
     uint8_t num_bytes = *payload_ptr++;
 
     if (payload_ptr + num_bytes > payload_end) {
-      fprintf(stderr, "Malformed TLV: incomplete value!\n");
+      LOG_ERROR("Malformed TLV: incomplete value!\n");
       return RESP_ERROR_MALFORMED;
     }
 
@@ -504,7 +506,7 @@ int parse_p2p_broadcast(message_t& request, p2p_broadcast_t& broadcast) {
         break;
       case TAG_SENDER_USERNAME:
         if (num_bytes > MAX_USERNAME_SIZE) {
-          fprintf(stderr, "Malformed TLV: sender username length exceeds limits!\n");
+          LOG_ERROR("Malformed TLV: sender username length exceeds limits!\n");
           return RESP_ERROR_MALFORMED;
         }
         broadcast.sender_username.assign(reinterpret_cast<const char*>(payload_ptr), num_bytes);
@@ -512,7 +514,7 @@ int parse_p2p_broadcast(message_t& request, p2p_broadcast_t& broadcast) {
         break;
       case TAG_RECIPIENT_USERNAME:
         if (num_bytes > MAX_USERNAME_SIZE) {
-          fprintf(stderr, "Malformed TLV: recipient username length exceeds limits!\n");
+          LOG_ERROR("Malformed TLV: recipient username length exceeds limits!\n");
           return RESP_ERROR_MALFORMED;
         }
         broadcast.recipient_username.assign(reinterpret_cast<const char*>(payload_ptr), num_bytes);
@@ -520,20 +522,19 @@ int parse_p2p_broadcast(message_t& request, p2p_broadcast_t& broadcast) {
         break;
       case TAG_MESSAGE_CONTENT:
         if (num_bytes > MAX_MSG_CONTENT_SIZE) {
-          fprintf(stderr, "Malformed TLV: message content length exceeds limits!\n");
+          LOG_ERROR("Malformed TLV: message content length exceeds limits!\n");
           return -1;
         }
         broadcast.message_content.assign(reinterpret_cast<const char*>(payload_ptr), num_bytes);
         has_content = 1;
         break;
       default:
-        // Unknown tag so skip it
-        fprintf(stderr, "Unknown TLV tag '%d', skipping %d bytes\n", tag, num_bytes);
+        LOG_WARN("Unknown TLV tag '%d', skipping %d bytes\n", tag, num_bytes);
     }
     payload_ptr += num_bytes;
   }
   if (!has_broadcast_tag || !has_sender || !has_recipient || !has_content) {
-    fprintf(stderr, "Malformed request: broadcast, sender, recipient or content tag missing from request payload!\n");
+    LOG_ERROR("Malformed request: broadcast, sender, recipient or content tag missing from request payload!\n");
     return RESP_ERROR_MALFORMED;
   }
   return 0;

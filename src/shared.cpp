@@ -1,37 +1,5 @@
 #include "shared.hpp"
 
-/**
- * Reusable error logging function
- * @param func_name The function the error happened at 
- * @param line The line number the error happened at.
- * @param msg The message that the developer put to describe the error.
- */
-void private_log_logic(const char* func_name, int line, const char* format, ...) {
-    // 1. Print the header (Function and Line)
-    // 2. Initialize the variable argument list
-    // 3. Use vfprintf to print the formatted string to stderr
-    // 4. Clean up and add a newline
-    fprintf(stderr, "[ERROR] %s:%d - ", func_name, line);
-    
-    va_list args;
-    va_start(args, format);
-
-    vfprintf(stderr, format, args);
-
-    va_end(args);
-    fprintf(stderr, "\n");
-}
-
-void log_message(const char *prefix, const char *msg) {
-    FILE *f = fopen("chat_server.log", "a");
-    if (f == NULL) return;
-    time_t now;
-    time(&now);
-    char *date = ctime(&now);
-    date[strlen(date) - 1] = '\0'; // Remove newline
-    fprintf(f, "[%s] %s: %s\n", date, prefix, msg);
-    fclose(f);
-}
 
 int get_valid_input_range(std::string_view prompt, int min, int max) {
   int value;

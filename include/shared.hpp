@@ -23,13 +23,7 @@
 #include <cctype>
 #include <limits> // Required for std::numeric_limits
 #include <string_view>
-
 #include <sstream> // string streams 
-
-
-void private_log_logic(const char* func_name, int line, const char* format, ...);
-#define LOG_ERROR(...) private_log_logic(__func__, __LINE__, __VA_ARGS__)
-
 
 #define MAX_USERNAME_SIZE 32
 #define MAX_PASSWORD_SIZE 32

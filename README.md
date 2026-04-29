@@ -9,7 +9,7 @@ Other noteworthy things handled in this project:
 - Application-layer binary protocol design
 - C++ programming
 - Network Programming
-
+- Concurrency: I/O Multiplexing, Non-blocking I/O
 
 ## Project setup
 ```bash

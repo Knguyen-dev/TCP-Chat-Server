@@ -47,7 +47,7 @@ int insert_user(user_t& user) {
 
 int get_user_by_username(std::string username, user_t& user) {
   sqlite3_stmt *res;
-  const char *sql = "SELECT id, username, password FROM users WHERE username = ?;";
+  const char *sql = "SELECT id, username, password FROM users WHERE LOWER(username) = ?;";
 
   // Prepare the SQL statement
   if (sqlite3_prepare_v2(db, sql, -1, &res, 0) != SQLITE_OK) {
