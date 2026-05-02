@@ -73,7 +73,7 @@ int setup_client_signal_handlers(conn_t* conn) {
  */
 static void print_chat_message(std::string_view sender, std::string_view recipient, std::string_view message) {
   if (!recipient.empty()) {
-    printf("[DM] %s -> %s> %s\n", sender.data(), recipient.data(), message.data());
+    printf("[DM] %s to %s: %s\n", sender.data(), recipient.data(), message.data());
   } else {
     printf("[GLOBAL] %s: %s\n", sender.data(), message.data());
   }
@@ -85,12 +85,10 @@ static void print_chat_message(std::string_view sender, std::string_view recipie
  * @param conn Connection representing the client's TCP connection with the server.
  * @return 0 on success, otherwise -1 on error.
  */
-static int handle_client_registration(conn_t& conn) {
+static int handle_client_registration(conn_t& conn, std::string& username, std::string& password) {
   registration_credentials_t credentials;
-  std::cout << "[Register] Enter a username: ";
-  std::getline(std::cin >> std::ws, credentials.username);
-  std::cout << "[Register] Enter a password: ";
-  std::getline(std::cin >> std::ws, credentials.password);
+  credentials.username = username;
+  credentials.password = password;
   uint32_t message_len{};
   uint8_t request_buffer[MSG_HEADER_SIZE+MSG_MAX_PAYLOAD_SIZE];
   if (build_register_request(request_buffer, credentials, message_len) == -1) {
@@ -109,12 +107,10 @@ static int handle_client_registration(conn_t& conn) {
  * @param conn Connection representing client's TCP connection with the server.
  * @return 0 on successful login, otherwise -1.
  */
-static int handle_client_login(conn_t& conn) {
+static int handle_client_login(conn_t& conn, std::string& username, std::string& password) {
   login_credentials_t credentials;
-  std::cout << "[Login] Enter a username: ";
-  std::getline(std::cin >> std::ws, credentials.username);
-  std::cout << "[Login] Enter a password: ";
-  std::getline(std::cin >> std::ws, credentials.password);
+  credentials.username = username;
+  credentials.password = password;
   uint8_t request_buffer[MSG_HEADER_SIZE+MSG_MAX_PAYLOAD_SIZE];
   uint32_t message_len{};
   if (build_login_request(request_buffer, credentials, message_len) == -1) {
@@ -255,7 +251,7 @@ static void handle_login_response(conn_t& conn, message_t& response) {
  */
 static void handle_broadcast_response(conn_t& conn, message_t& response) {
   if (response.rc != 0) {
-    LOG_WARN("[CHAT] Message failed to send!\n");
+    LOG_WARN("[CHAT] Message failed to send: %s\n", get_response_message(static_cast<response_code_t>(response.rc)).data());
     return;
   }
   int broadcast_type = peek_broadcast_type(response);
@@ -375,8 +371,6 @@ static bool command_shell(conn_t& conn, std::string& input_line) {
     std::string message;
     ss >> recipient;
     std::getline(ss >> std::ws, message);
-
-    recipient = string_to_lower(recipient);
     if (recipient.empty() || message.empty()) {
       LOG_INFO("[System] Usage '/p2p <recipient_username> <Your Message>'\n");
       return true;
@@ -401,13 +395,31 @@ static bool command_shell(conn_t& conn, std::string& input_line) {
       LOG_INFO("[System] Can't login since already logged in as '%s'!\n", conn.user->username.data());
       return true;
     }
-    handle_client_login(conn);
+
+    std::string username;
+    std::string password; 
+    ss >> username;
+    ss >> password;
+    if (username.empty() || password.empty()) {
+      LOG_INFO("[Login] Usage '/login <username> <password>'\n");
+      return true;
+    }
+
+    handle_client_login(conn, username, password);
   } else if (command == "/register") {
     if (conn.user != nullptr) {
       LOG_INFO("[System] Can't register since already logged in as '%s'!\n", conn.user->username.data());
       return true;
     }
-    handle_client_registration(conn);
+    std::string username;
+    std::string password;
+    ss >> username;
+    ss >> password;
+    if (username.empty() || password.empty()) {
+      LOG_INFO("[Register] Usage '/register <username> <password>'\n");
+      return true;
+    }
+    handle_client_registration(conn, username, password);
   } else if (command == "/quit") {
     printf("[System] User quit! Thanks for using TCP-Chat!\n");
     return false;

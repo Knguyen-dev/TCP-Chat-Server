@@ -288,12 +288,13 @@ static int handle_broadcast_message(conn_t& conn, int epollfd, message_t& reques
 
         // NOTE: Need to set the recipient connections to a writing state to send them data.
         buf_append(conn_table[i]->outgoing, serialized_response.data(), serialized_response.size());
-        set_connection_state(epollfd, conn, false);
+        set_connection_state(epollfd, *conn_table[i], false);
       }
       break;
     }
     case TAG_P2P_BROADCAST: {
       // 1. Parse the sender's broadcast request into something readable.
+      // TODO: Usenrmae is for some reason lowercased?
       p2p_broadcast_t broadcast{};
       int ret = parse_p2p_broadcast(request, broadcast);
       if (ret != 0) {
@@ -321,7 +322,7 @@ static int handle_broadcast_message(conn_t& conn, int epollfd, message_t& reques
         if (i == (size_t)conn.fd || conn_table[i] == nullptr || conn_table[i]->user == nullptr) {
           continue;
         }
-        if (conn.user->username == broadcast.recipient_username) {
+        if (conn_table[i]->user->username == broadcast.recipient_username) {
           recipient_conn = conn_table[i];
           break;
         }

@@ -239,14 +239,15 @@ int build_register_request(uint8_t* request_buffer, registration_credentials_t& 
   write_tlv(payload_ptr, TAG_PASSWORD, credentials.password.length(), credentials.password.data(), 0);
 
   // Calculate payload length and writ it 
-  uint32_t payload_len = (uint32_t)(payload_ptr - (request_buffer+MSG_HEADER_SIZE));
+  message_len = payload_ptr - request_buffer;
+  uint32_t payload_len = message_len - MSG_HEADER_SIZE;
+  uint32_t net_payload_len = htonl(payload_len);
   if (payload_len > MSG_MAX_PAYLOAD_SIZE) {
     LOG_ERROR("Payload of size %d bytes exceeds maximum of %d!\n", payload_len, MSG_MAX_PAYLOAD_SIZE);
     return -1;
   }
-  uint32_t net_payload_len = htonl(payload_len);
+  
   memcpy(header_ptr, &net_payload_len, sizeof(net_payload_len));
-  message_len = MSG_HEADER_SIZE + payload_len;
   return 0;
 }
 
@@ -387,14 +388,14 @@ int build_login_request(uint8_t* request_buffer, login_credentials_t& credential
   write_tlv(payload_ptr, TAG_PASSWORD, credentials.password.length(), credentials.password.data(), 0);
 
   // Calculate payload length and write it to header
-  uint32_t payload_len = (uint32_t)(payload_ptr - (request_buffer+MSG_HEADER_SIZE));
+  message_len = payload_ptr - request_buffer;
+  uint32_t payload_len = message_len - MSG_HEADER_SIZE;
+  uint32_t net_payload_len = htonl(payload_len);
   if (payload_len > MSG_MAX_PAYLOAD_SIZE) {
     LOG_ERROR("Payload of size %d bytes exceeds maximum of %d!\n", payload_len, MSG_MAX_PAYLOAD_SIZE);
     return -1;
   }
-  uint32_t net_payload_len = htonl(payload_len);
   memcpy(header_ptr, &net_payload_len, sizeof(net_payload_len));
-  message_len = MSG_HEADER_SIZE + payload_len;
   return 0;
 }
 
@@ -632,8 +633,8 @@ int parse_world_broadcast_notification(message_t& msg, world_broadcast_t& broadc
 // ---------------------------------
 
 int build_p2p_broadcast(uint8_t* request_buffer, p2p_broadcast_t& broadcast, uint32_t& message_len) {
-  uint8_t* header_ptr = request_buffer;
-  uint8_t* payload_ptr = request_buffer + MSG_HEADER_SIZE;
+  uint8_t* header_ptr{request_buffer};
+  uint8_t* payload_ptr{request_buffer + MSG_HEADER_SIZE};
 
   // Input validation checks
   if (broadcast.sender_username.length() > MAX_USERNAME_SIZE) {
@@ -645,7 +646,7 @@ int build_p2p_broadcast(uint8_t* request_buffer, p2p_broadcast_t& broadcast, uin
     return -1;
   }
   if (broadcast.sender_username == broadcast.recipient_username) {
-    LOG_WARN("build_p2p_broadcast Failure: Sender and Recipient username matched!\n");
+    LOG_ERROR("build_p2p_broadcast Failure: Sender and Recipient username matched!\n");
     return -1;
   }
    if (broadcast.message_content.length() > MAX_MSG_CONTENT_SIZE) {
@@ -660,18 +661,18 @@ int build_p2p_broadcast(uint8_t* request_buffer, p2p_broadcast_t& broadcast, uin
   write_tlv(payload_ptr, TAG_MESSAGE_CONTENT, broadcast.message_content.length(), broadcast.message_content.data(), 0);
   
   // Calculate payload and write header fields into message
-  uint32_t payload_len = (uint32_t)(payload_ptr - request_buffer+MSG_HEADER_SIZE);
+  message_len = payload_ptr - request_buffer;
+  uint32_t payload_len = message_len - MSG_HEADER_SIZE;
   uint32_t net_payload_len = htonl(payload_len);
   if (payload_len > MSG_MAX_PAYLOAD_SIZE) {
     LOG_ERROR("P2P Message Failed: Payload of size %d bytes exceeds maximum of %d!\n", payload_len, MSG_MAX_PAYLOAD_SIZE);
     return -1;
   }
-
+  
   *header_ptr++ = 1;
   *header_ptr++ = CHAT;
   *header_ptr++ = 0;
   memcpy(header_ptr, &net_payload_len, sizeof(uint32_t));
-  message_len = MSG_HEADER_SIZE+payload_len;
   return 0;
 }
 
