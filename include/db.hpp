@@ -1,8 +1,12 @@
 #ifndef DB_H
 #define DB_H
 
-#include "shared.h"
-#include <sqlite3.h>
+#include "shared.hpp"
+
+// C-library 
+extern "C" {
+  #include <sqlite3.h>
+}
 
 /**
  * Initializes sqlite database schema and connection
@@ -20,7 +24,7 @@ void close_db();
  * @param user User to be inserted into the database.
  * @return 0 on success, otherwise -1
  */
-int insert_user(user_t* user);
+int insert_user(user_t& user);
 
 /**
  * Attempts to query user by their username
@@ -29,6 +33,6 @@ int insert_user(user_t* user);
  * @param user Empty struct that'll be populated with user information if a user is found.
  * @return 1 if user was found, 0 if they didn't exist, and -1 if we had an error.
  */
-int get_user_by_username(char* username, user_t* user);
+int get_user_by_username(std::string username, user_t& user);
 
 #endif
