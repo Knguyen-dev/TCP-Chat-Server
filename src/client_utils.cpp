@@ -1,306 +1,484 @@
 #include "client_utils.hpp"
 
+// -----------------------------
+// Signal Handling and Graceful Shutdown
+// -----------------------------
+
+// Shared shutdown pipe between main and socket thread
+// NOTE: Used for when the client closes the connection.
+// Where g_shutdown_pipe[0] is the read fd (for peer) and g_shutdown_pipe[1] is 
+// the write fd (for main).
+static int g_shutdown_pipe[2] = {-1, -1};
+
+// Atomic flag that controls the command loop.
+std::atomic<bool> g_keep_running{true};
+
+// Mutex that protects the connection struct
+std::mutex g_conn_mutex;
+
+// Represent the client's connection with the server.
+// The mutex that ensures only one thread accesses the connection.
+// NOTE: The connection object itself is accessed by the main and socket thread.
+conn_t* g_client_conn;
+
+
+
+/**
+ * Signal handler for SIGINT (Ctrl+C).
+ * 
+ * IMPORTANT: Signal handlers must be "signal-safe" - they can only safely call
+ * a limited set of functions (write, close, exit, etc.). Avoid C++ constructs,
+ * function calls to non-async-safe functions, or anything that allocates memory.
+ */
+static void handle_client_sigint(int sig) { 
+  const char msg[] = "\n[SIGINT] Shutting down...\n";
+  ssize_t unused = write(STDERR_FILENO, msg, sizeof(msg) - 1);
+  (void)unused;
+  g_keep_running.store(false);
+}
+
+int setup_client_signal_handlers(conn_t* conn) {
+  // Client connection pointer
+  if (!conn) {
+    LOG_ERROR("setup_signal_handlers called with null connection");
+    return -1;
+  }
+
+  g_client_conn = conn;
+
+  // Install signal handler
+  struct sigaction sa;
+  memset(&sa, 0, sizeof(sa));
+  sa.sa_handler = handle_client_sigint;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = 0;
+  if (sigaction(SIGINT, &sa, nullptr) == -1) {
+    LOG_ERROR("Failed to install SIGINT handler: %s\n", strerror(errno));
+    return -1;
+  }
+  LOG_DEBUG("Signal handlers installed\n");
+  return 0;
+}
+
 // ---------------------------
-// Client Service API e.g. login, registration, messaging.
+// Client message request functions. 
+// All of these will handle sending the message request to the server
 // ---------------------------
 
 /**
- * Prints a formatted message to stdout based on message type. Centralizes all message output formatting.
- * 
- * @param sender_username The username of the sender
- * @param recipient_username The username of the recipient (NULL for global messages)
- * @param message_content The content of the message
+ * Posts a formatted message to the UI thread.
+ * @param sender The username of the sender
+ * @param recipient The username of the recipient (NULL for global messages)
+ * @param message The content of the message being sent
  */
-void print_message(std::string_view sender_username, std::string_view recipient_username, std::string_view message_content) {
-  if (recipient_username != NULL) {
-    printf("[DM] %s -> %s> %s\n", sender_username, recipient_username, message_content);
+static void print_chat_message(std::string_view sender, std::string_view recipient, std::string_view message) {
+  if (!recipient.empty()) {
+    printf("[DM] %s -> %s> %s\n", sender.data(), recipient.data(), message.data());
   } else {
-    printf("[GLOBAL] %s> %s\n", sender_username, message_content);
+    printf("[GLOBAL] %s: %s\n", sender.data(), message.data());
   }
 }
 
 /**
- * Handles prompting user input and sending data over the wire.
+ * Handles prompting user input and sending a request for a world message to the server.
  * 
- * @param clientfd The client fd associated with our TCP connection
+ * @param conn Connection representing the client's TCP connection with the server.
  * @return 0 on success, otherwise -1 on error.
  */
-int handle_client_registration(int clientfd) {
-
-  // Get user credentials
-  registration_credentials_t credentials = {0};
-  get_string_cin("Enter a username: ", credentials.username);
-  get_string_cin("Enter a password: ", credentials.password);
-
-  // 1. Create request message
-  message_t request_message = {0};
-  if (build_register_request(request_message, credentials) == -1) {
+static int handle_client_registration(conn_t& conn) {
+  registration_credentials_t credentials;
+  std::cout << "[Register] Enter a username: ";
+  std::getline(std::cin >> std::ws, credentials.username);
+  std::cout << "[Register] Enter a password: ";
+  std::getline(std::cin >> std::ws, credentials.password);
+  uint32_t message_len{};
+  uint8_t request_buffer[MSG_HEADER_SIZE+MSG_MAX_PAYLOAD_SIZE];
+  if (build_register_request(request_buffer, credentials, message_len) == -1) {
+    LOG_ERROR("[System] Failed to build registration request!\n");
+    return -1;
+  }  
+  if (write_one_message(conn.fd, request_buffer, message_len) == -1) {
+    LOG_ERROR("[System] Failed to write registraton request!\n");
     return -1;
   }
-
-  // 2. Send it over the wire 
-  if (write_one_message(clientfd, &request_message) == -1) {
-    return -1;
-  }
-
-  // 3. Read the response from the server
-  message_t response = {0};
-  if (read_one_message(clientfd, &response) == -1) {
-    return -1;
-  }
-
-  printf("Server Response (code=%d): %s\n", response.rc, response_messages[response.rc]);
   return 0;
 }
 
 /**
  * Handles prompting user input, and attempting a login for the user.
- * @param clientfd Client fd that's used in the socket connection.
- * @param user Pointer to a user struct that we'll populate with the info of the authenticated user.
+ * @param conn Connection representing client's TCP connection with the server.
  * @return 0 on successful login, otherwise -1.
  */
-int handle_client_login(int clientfd, user_t& user) {
-  
-  // Build login credentials
-  // TODO: Update get_string_cin to do length checks please
-  login_credentials_t credentials = {0};
-  get_string_cin("Username: ", credentials.username);
-  get_string_cin("Password: ", credentials.password);
-  
-  // 1. Create request message and send it across the wire
-  message_t request = {0};
-  if (build_login_request(request, credentials) != 0) {
+static int handle_client_login(conn_t& conn) {
+  login_credentials_t credentials;
+  std::cout << "[Login] Enter a username: ";
+  std::getline(std::cin >> std::ws, credentials.username);
+  std::cout << "[Login] Enter a password: ";
+  std::getline(std::cin >> std::ws, credentials.password);
+  uint8_t request_buffer[MSG_HEADER_SIZE+MSG_MAX_PAYLOAD_SIZE];
+  uint32_t message_len{};
+  if (build_login_request(request_buffer, credentials, message_len) == -1) {
+    LOG_ERROR("[Login] Failed to build login request!\n");
     return -1;
   }
-  if (write_one_message(clientfd, &request) == -1) {
-    return -1;
-  } 
-
-  // 2. Read and parse server response
-  message_t response = {0};
-  if (read_one_message(clientfd, &response) == -1) {
+  if (write_one_message(conn.fd, request_buffer, message_len) == -1) {
+    LOG_ERROR("[Login] Failed to write login request!\n");
     return -1;
   }
-  if (response.rc != RESP_OK) {
-    printf("Login Failed (code=%d): %s\n", response.rc, response_messages[response.rc]);
-    return -1;
-  }
-
-  user.username = credentials.username;
-
-  printf("Login successful: Now joined as '%s'!\n", credentials.username);
   return 0;
 }
 
 /**
  * Handles broadcasting a message to all other users connected to the TCP server.
- * @param clientfd File descriptor linked to the TCP connection socket the client has with the server.
- * @param user User that the client is logged in as.
+ * @param conn Connection representing client's TCP connection with the server.
  * @param message_content The text or message content that we're sending to all other users.
+ * @note The user input for this request is gathered in the caller, as a stylistic choice. For example 
+ * the caller can just type /world <message> to send their message, sending their command and its args in one 
+ * line.
  */
-void handle_world_message(int clientfd, user_t& user, char& message_content) {
-  // 1. Build world broadcast request message
-  world_broadcast_t broadcast = {0};
-  broadcast.sender_username = user.username;
+static void handle_world_message(conn_t& conn, std::string& message_content) {
+  world_broadcast_t broadcast;
+  broadcast.sender_username = conn.user->username;
   broadcast.message_content = message_content;
-  message_t request = {0};
-  if (build_world_broadcast(request, broadcast) != 0) {
-    printf("Client Failure: Failed to build world broadcast!\n");
+  uint8_t request_buffer[MSG_HEADER_SIZE + MSG_MAX_PAYLOAD_SIZE];
+  uint32_t message_len{};
+  if (build_world_broadcast(request_buffer, broadcast, message_len) == -1) {
+    LOG_ERROR("[System] Client Failure: Failed to build world broadcast!\n");
     return;
   }
-
-  // 2. Send world broadcast message over TCP
-  if (write_one_message(clientfd, &request) == -1) {
-    printf("Client Failure: Failed to write world broadcast!\n");
+  if (write_one_message(conn.fd, request_buffer, message_len) == -1) {
+    LOG_ERROR("[System] Client Failure: Failed to write world broadcast!\n");
     return;
   }
-
-  // 3. Read response message from the server
-  // a. If bad response code, output failure message
-  // b. Otherwise, output message indicating user's message was broadcasted
-  message_t response = {0};
-  if (read_one_message(clientfd, &response) != 0) {
-    printf("Client Failure: Failed to read server response message.\n");
-    return;
-  }
-  if (response.rc != 0) {
-    printf("Server Failure: Your message wasn't broadcasted.\n");
-    return;
-  }
-
-  print_message(broadcast.sender_username, NULL, broadcast.message_content);
 }
 
 /**
- * Handles sending a message to a single remote peer through the TCP server.
- * @param clientfd File descriptor linked to the TCP connection socket the client has with the server.
- * @param user User that the client is logged in as.
+ * Handles sending a p2p message request to the server
+ * @param conn Connection representing client's TCP connection with the server.
  * @param recipient_username The username of the recipient user that the message is being sent to.
  * @param message_content The text or message content that we're sending to the recipient user.
+ * 
+ * @note User input for this is gathered in the caller. This is merely a stylistic choice.
  */
-void handle_peer_message(int clientfd, user_t& user, char& recipient_username, char& message_content) {
-  
-  // 1. Create world broadcast request and send it over the wire
-  p2p_broadcast_t broadcast = {0};
-  broadcast.sender_username = user.username;
+static void handle_peer_message(conn_t& conn, std::string& recipient_username, std::string& message_content) {
+  p2p_broadcast_t broadcast;
+  broadcast.sender_username = conn.user->username;  
   broadcast.recipient_username = recipient_username;
   broadcast.message_content = message_content;
-  message_t request = {0};
-  if (build_p2p_broadcast(request, broadcast) != 0) {
-    printf("Client Failure: Failed to build P2P broadcast!\n");
+  uint8_t request_buffer[MSG_HEADER_SIZE+MSG_MAX_PAYLOAD_SIZE];
+  uint32_t message_len{};
+  if (build_p2p_broadcast(request_buffer, broadcast, message_len) == -1) {
+    LOG_ERROR("[System] Client Failure: Failed to build P2P broadcast!\n");
     return;
   }
-  
-  // TODO: Prefer reference variables over pointers please.
-  if (write_one_message(clientfd, &request) == -1) {
-    printf("Client Failure: Failed to write P2P broadcast!\n");
+  if (write_one_message(conn.fd, request_buffer, message_len) == -1) {
+    LOG_ERROR("[System] Client Failure: Failed to write P2P broadcast!\n");
     return;
-  }
-  
-  // 2. Read response from the server
-  message_t response = {0};
-  if (read_one_message(clientfd, &response) != 0) {
-    printf("Client Failure: Failed to read server response!\n");
-    return;
-  }
-
-  // 3. Output results to the client
-  if (response.rc == 0) {
-    print_message(broadcast.sender_username, broadcast.recipient_username, broadcast.message_content);
-  } else {
-    printf("Server Failure (code=%d): P2P message was sent, but not broadcasted! Extra details: %s\n", response.rc, response_messages[response.rc]);
   }
 }
 
+// -------------------------------
+// Client message response functions; are called in a separate thread.
+// These handle processing responses from the server e.g. response to registration, login, etc.
+// -------------------------------
+
 /**
- * Handles receiving broadcast notification messages from the server. 
- * 
- * @param clientfd File descriptor linked to the TCP connection socket the client has with the server.
- * @return 0 on success, otherwise -1 when the server closes connection.
+ * Handles the server's response to a client's user registration.
+ * @param conn Connection representing client's TCP connection with the server.
+ * @param response A parsed message object whose message_t::type is assumed to 
+ * be 'REGISTER'. It contains info about the server's response to the client's 
+ * registration request.
  */
-int handle_broadcast_notification(int clientfd) {
-  message_t response = {0};
-
-  // If failed, then return -1 to back out
-  if (read_one_message(clientfd, &response) == -1) {
-    printf("Server closed connection! Redirecting to main menu!\n");
-    return -1;
+static void handle_registration_response(message_t& response) {
+  if (response.rc != 0) {
+    LOG_WARN(
+      "[Registration]: User Registraton Failed: %s\n",
+      get_response_message(static_cast<response_code_t>(response.rc)).data()
+    );
+    return;
   }
 
-  if (response.type != CHAT) {
-    // NOTE: This shouldn't really happen.
-    printf("Server response wasn't a chat message!\n");
-    return -1;
+  user_t user{};
+  int ret = parse_register_response(response, user);
+  if (ret == -1) {
+    LOG_ERROR("parse_register_response() failed!\n");
+    return;
   }
-  int broadcast_type = peek_broadcast_type(&response);
+  LOG_INFO(
+    "[Registration]: Successful, <User id=%d, username=%s>\n", 
+    user.id, user.username.data()
+  );
+}
+
+/**
+ * Handles the server's response to a client's user login request.
+ * @param conn Connection representing the client's TCP connection with the server.
+ * @param response A response message whose message_t::type is assumed to be 
+ * 'LOGIN'. It contains inof about the server's response to the client's login request.
+ */
+static void handle_login_response(conn_t& conn, message_t& response) {
+  if (response.rc != 0) {
+    LOG_WARN(
+      "[LOGIN]: User Login Failed: %s\n",
+      get_response_message(static_cast<response_code_t>(response.rc)).data()
+    );
+    return;
+  }
+  user_t user{};
+  int ret = parse_login_response(response, user);
+  if (ret == -1) {
+    LOG_ERROR("parse_login_response() failed!\n");
+    return;
+  }
+  LOG_INFO("[Login]: Successful, <User id=%d, username=%s>\n", user.id, user.username.data());
+
+  /*
+  TODO: Segmentation fault happens here
+  Again seg faults happen when we're accessing memory incorrectly.
+  Below we're accessing two levels of pointers, and the seg fault has happened
+  likely becuase we dereferenced a null pointer.
   
+  */
+
+  user_t* new_user = new user_t();
+  new_user->id = user.id;
+  new_user->username = user.username;
+  std::lock_guard<std::mutex> lock(g_conn_mutex);
+  g_client_conn->user = new_user;
+}
+
+/**
+ * Handles processing the server's response message to the client broadcast request message.
+ * @param conn Connection representing the client's TCP connection with the server.
+ * @param response A response message whose message_t::type is CHAT. It contains info about the 
+ * server's response to the client's broadcast request.
+ */
+static void handle_broadcast_response(conn_t& conn, message_t& response) {
+  if (response.rc != 0) {
+    LOG_WARN("[CHAT] Message failed to send!\n");
+    return;
+  }
+  int broadcast_type = peek_broadcast_type(response);
   switch (broadcast_type) {
     case TAG_P2P_BROADCAST: {
-      p2p_broadcast_t broadcast = {0};
-      parse_p2p_broadcast_notification(&response, &broadcast);
-      print_message(broadcast.sender_username, broadcast.recipient_username, broadcast.message_content);
+      p2p_broadcast_t broadcast{};
+      parse_p2p_broadcast_notification(response, broadcast);
+      print_chat_message(broadcast.sender_username, broadcast.recipient_username, broadcast.message_content);
       break;
     }
     case TAG_WORLD_BROADCAST: {
-      world_broadcast_t broadcast = {0};
-      parse_world_broadcast_notification(&response, &broadcast);
-      print_message(broadcast.sender_username, NULL, broadcast.message_content);
+      world_broadcast_t broadcast{};
+      parse_world_broadcast_notification(response, broadcast);
+      print_chat_message(broadcast.sender_username, "", broadcast.message_content);
       break;
     }
     default: {
-      // NOTE: Shouldn't really happen.
-      printf("Unknown broadcast_type '%d'!\n", broadcast_type);
+      LOG_WARN("Unknown broadcast_type '%d'!\n", broadcast_type);
     }
   }
-
-  return 0;
 }
 
-// ---------------------------
-// Client Loop and user input
-// ---------------------------
-
-void shell(int clientfd, user_t* user) {
-  char prompt[100] = {0};
-  char command_buffer[10 + MAX_USERNAME_SIZE + MAX_MSG_CONTENT_SIZE + 1]; // Enough for "/<command>, where command=world or p2p" and additional args
-  get_stdin(prompt, command_buffer, sizeof(command_buffer));
-
-  char* command = strtok(command_buffer, " ");
-  if (command == NULL) {
-    return;
+/**
+ * Handles processing a response from the server.
+ * @param conn Connection representing client's TCP connection with the server.
+ * @return true on successful reading/processing, false when the servver stops responding 
+ */
+static bool handle_server_response(conn_t& conn) {
+  // General Workflow
+  // 1. Read one and parse one full message into response
+  // 2. Based on human-readable response message handle the response message with one of our handlers
+  message_t response{};
+  uint8_t payload_buffer[MSG_MAX_PAYLOAD_SIZE];
+  response.payload = payload_buffer;
+  int rc = read_one_message(conn.fd, response);
+  if (rc == -1) {
+    return false;
   }
-  string_to_lower(command);
+  switch (response.type) {
+    case REGISTER:
+      handle_registration_response(response);
+      break;
+    case LOGIN:
+      handle_login_response(conn, response);
+      break;
+    case CHAT:
+      handle_broadcast_response(conn, response);
+      break;
+    default:
+      LOG_WARN("Server response type unknown: '%d'\n", response.type);
+  }
+  return true;
+}
 
-  if (strcmp(command, "/p2p") == 0) {
-    char* recipient_username = strtok(NULL, " ");
-    string_to_lower(recipient_username);
-    char* message = strtok(NULL, ""); // get the remaining string
-    if (!recipient_username || !message) {
-      printf("Error: Usage '/p2p <recipient_username> <Your Message>'\n");
-      return;
+/**
+ * Handler function for the background thread that listens for asynchronous broadcasts from the server.
+ * @param conn Connection representing the client's TCP connection with the server.
+ */
+static void socket_thread_handler(conn_t& conn) {
+  // ##### Two ways this thread can finish #####
+  // 1. Server closes connection: Sends a FIN packet, which should trigger the POLL readiness API, then 
+  // the handle_broadcast_notification will return false. Then the user quits on their own.
+  // 2. User types '/quit', where main thread signals peer to break out of loop and terminate.
+  struct pollfd pfds[2]{};
+  while (true) {
+    memset(pfds, 0, sizeof(pfds));
+    pfds[0].fd = conn.fd;
+    pfds[0].events = POLLIN | POLLERR;
+    pfds[1].fd = g_shutdown_pipe[0];
+    pfds[1].events = POLLIN;
+
+    int ret = poll(pfds, 2, -1);
+    if (ret == -1) {
+      LOG_ERROR("Poll Error: %s\n", strerror(errno));
+      break;
     }
-    handle_peer_message(clientfd, user, recipient_username, message);    
-  } else if (strcmp(command, "/world") == 0) {
-    char* message = strtok(NULL, "");
-    if (!message) {
-      printf("Error: Usage '/world <your message>\n");
-      return;
+
+    // Main thread signalled shutdown, break out of loop.
+    if (pfds[1].revents & POLLIN) {
+      break;
     }
-    handle_world_message(clientfd, user, message);
+
+    // Handle a broadcast notification.
+    // If we failed to handle it e.g., server closed connection, 
+    // then we'll break out of the loop.
+    if (pfds[0].revents & (POLLIN | POLLERR)) {
+      if (!handle_server_response(conn)) {
+        break;
+      }
+    }
+  }
+}
+
+
+// ----------------------
+// Main command loop
+// ----------------------
+
+/**
+ * Runs the shell for a given client connection.
+ * @param conn Connection representing the client's TCP connection with the server.
+ * @param input_line String representing the inputted line.
+ * @return true on success, false when the user wants to exit the message loop!
+ */
+static bool command_shell(conn_t& conn, std::string& input_line) {
+  std::stringstream ss{input_line};
+  std::string command;
+  if (!(ss >> command)) return true;  // Extract first word and lowercase it; this is the command
+  command = string_to_lower(command);
+
+  if (command == "/p2p") {
+    if (conn.user == nullptr) {
+      LOG_INFO("[System] You must log in before messaging!\n");
+      return true;
+    }
+    std::string recipient;
+    std::string message;
+    ss >> recipient;
+    std::getline(ss >> std::ws, message);
+
+    recipient = string_to_lower(recipient);
+    if (recipient.empty() || message.empty()) {
+      LOG_INFO("[System] Usage '/p2p <recipient_username> <Your Message>'\n");
+      return true;
+    }
+    handle_peer_message(conn, recipient, message);    
+  } else if (command == "/world") {
+    if (conn.user == nullptr) {
+      LOG_INFO("[System] You must log in before messaging!\n");
+      return true;
+    }
+
+    std::string message;
+    std::getline(ss >> std::ws, message);
+    if (message.empty()) {
+      LOG_INFO("[System] Usage '/world <your message>'\n");
+      return true;
+    }
+
+    handle_world_message(conn, message);
+  } else if (command == "/login") {
+    if (conn.user != nullptr) {
+      LOG_INFO("[System] Can't login since already logged in as '%s'!\n", conn.user->username.data());
+      return true;
+    }
+    handle_client_login(conn);
+  } else if (command == "/register") {
+    if (conn.user != nullptr) {
+      LOG_INFO("[System] Can't register since already logged in as '%s'!\n", conn.user->username.data());
+      return true;
+    }
+    handle_client_registration(conn);
+  } else if (command == "/quit") {
+    printf("[System] User quit! Thanks for using TCP-Chat!\n");
+    return false;
   } else {
-    printf("Unknown Command: %s\n", command);
-  }  
+    LOG_WARN("Unknown command: %s\n", command.data());
+  }
+  return true;
 }
 
 /**
  * Runs an event loop for the client
- * 
- * @param clientfd fd for the TCP connection socket.
+ * @param conn Connection representing the client's TCP connection with the server.
  */
-void run_messaging_loop(int clientfd, user_t* user) {
-  struct pollfd fds[2];
-  
-  while (1) {
-    // Step 1: Prepare poll args for stdin and tcp connection (read and any errors)
-    // a. Clear existing structs (since they've been modified by prev loop)
-    // b. Create new structs that are listening for read and error events
-    memset(fds, 0, sizeof(fds));
-    fds[0].fd = STDIN_FILENO;
-    fds[0].events = POLLIN | POLLERR;
-    fds[1].fd = clientfd;
-    fds[1].events = POLLIN | POLLERR;
-    nfds_t nfds = sizeof(fds) / sizeof(fds[0]);
-    int ret = poll(fds, nfds, -1);
-    if (ret == -1) {
-      fprintf(stderr, "Poll Error (Shutting down app): %s\n", strerror(errno));
-      exit(0);
-    }
+void run_messaging_loop(conn_t& conn) {
 
-    // Check if the server sent something
-    if (fds[1].revents & POLLIN) {
-      int rc = handle_broadcast_notification(clientfd);
-      if (rc == -1) {
-        break;
-      }
-    }
-
-    // Check if the user is typing something 
-    // NOTE: I'm assuming this would check when the input stream has data?
-    // I'm assuming this doesn't just trigger as I'm typing in something.
-    if (fds[0].revents & POLLIN) {
-      shell(clientfd, user);
-    }
+  // NOTE: Create a pipe for IPC between the main and peer thread. 
+  // This allows the main thread to write a signal to the peer thread 
+  // for manually breaking out the loop.
+  if (pipe(g_shutdown_pipe) == -1) {
+    LOG_ERROR("Failed to create shutdown pipe: %s\n", strerror(errno));
+    return;
   }
-}
 
+  // Run main thread and peer thread
+  std::thread socket_thread(socket_thread_handler, std::ref(conn)); 
+  while (g_keep_running) {
+    std::string buffer{};
+    if (!std::getline(std::cin, buffer)) {
+      LOG_ERROR("std::getline got an EOF or error\n");
+      return;
+    }
+    if (!command_shell(conn, buffer)) {
+      break;
+    }    
+  }
+
+  // Main thread tells peer thread to shutdown
+  // NOTE: Done first so that any incoming messages are stored/processed.
+  // before we just completely close the connection in the next section.
+  uint8_t signal = 1;
+  ssize_t ret = write(g_shutdown_pipe[1], &signal, 1);
+  if (ret == -1) {
+    LOG_ERROR("write() failure: %s!\n", strerror(errno));
+    return;
+  }
+  socket_thread.join();
+  close(g_shutdown_pipe[0]);
+  close(g_shutdown_pipe[1]);
+
+  // lock the connection mutex
+  // 1. Free the connection
+  // 2. Free the heap allocated user pointer if it exists 
+  std::lock_guard<std::mutex> lock(g_conn_mutex);
+  if (g_client_conn->fd != -1) {
+    close(g_client_conn->fd);  
+  }
+  if (g_client_conn->user != nullptr) {
+    delete g_client_conn->user;
+  }
+
+  LOG_INFO("See you again someday, somewhere!\n");
+}
 
 // -------------------------------
 // Network Connection and Setup
 // -------------------------------
-int create_client_connection(char* ip, short port) {  
+
+int create_client_connection(char* ip, short port, conn_t& conn) {  
   int fd = socket(AF_INET, SOCK_STREAM, 0);
   if (fd < 0) {
-    fprintf(stderr, "socket() error: %s!\n", strerror(errno));
+    LOG_ERROR("socket() error: %s!\n", strerror(errno));
     return -1;
   }
 
@@ -313,17 +491,19 @@ int create_client_connection(char* ip, short port) {
   int result = inet_pton(AF_INET, ip, &server_addr.sin_addr);
   if (result <= 0) {
     close(fd);
-    fprintf(stderr, "inet_ptons() failed: Invalid IP address '%s'!\n", ip);
+    LOG_ERROR("inet_ptons() failed: Invalid IP address '%s'!\n", ip);
     return -1;
   }
 
-  // Attempt to connect to server IP 
+  // Attempt to connect to server IP:port
   int conn_result = connect(fd, (struct sockaddr*)&server_addr, sizeof(server_addr));
   if (conn_result == -1) {
     close(fd);
-    fprintf(stderr, "connect() failed: '%s'!\n", strerror(errno));
+    LOG_ERROR("connect() failed: '%s'!\n", strerror(errno));
     return -1;
   }
-  
+
+  memcpy(&conn.addr, &server_addr, sizeof(server_addr));
+  conn.fd = fd;
   return fd;
 }

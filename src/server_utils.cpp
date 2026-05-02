@@ -111,7 +111,7 @@ void remove_connection(int fd, int epollfd) {
   // If authenticated, free malloced user and nullify to prevent dangling pointer
   conn_t* conn = conn_table[fd];
   if (conn->user) {
-    free(conn->user);
+    delete conn->user;
     conn->user = nullptr;
   }
 
@@ -127,18 +127,12 @@ void remove_connection(int fd, int epollfd) {
 
 /**
  * Authenticates a connection by making the user field point to a dynamically allocated user.
- * 
  * @param connfd Integer representing the client/user's socket connection descriptor.
  * @param user User that we're authenticating this connection with.
- * 
- * NOTE: This function will handle the dynamic memory allocation
+ * @note This function will handle the dynamic memory allocation
  */
-static void authenticate_connection(int connfd, user_t& user) {  
-  user_t *new_user = (user_t *)malloc(sizeof(user_t));
-  if (!new_user) {
-    LOG_ERROR("malloc() failed in authenticate_connection()\n");
-    return;
-  }
+static void authenticate_connection(int connfd, user_t& user) {
+  user_t* new_user = new user_t();
   *new_user = user;
   conn_table[connfd]->user = new_user;
 }
@@ -151,12 +145,16 @@ static void authenticate_connection(int connfd, user_t& user) {
  * Registers a user into the application
  * 
  * @param request Request message struct that has the data needed to register a user.
+ * @param response Empty response message that this function will modify/populate with data based
+ * based on the status of the current request.
  * @return 0 if success, otherwise an error response code.
  */
-static int register_user(message_t& request) {
+static int register_user(message_t& request, message_t& response) {
   registration_credentials_t credentials = {};
   int rc = parse_register_request(request, credentials);
   if (rc != 0) {
+    LOG_ERROR("parse_register_request Failure!\n");
+    response = build_server_response(REGISTER, static_cast<response_code_t>(rc), NULL, 0);
     return rc;
   }
 
@@ -164,13 +162,15 @@ static int register_user(message_t& request) {
   // NOTE: This approach preserves the casing of the usernames, but enforces 
   // case-insensitive uniqueness. So 'Alice' and 'alice' are considered the same username, and 
   // if 'Alice' is registered first, then 'alice' will be rejected as a registration username.
-  user_t user{};
-  rc = get_user_by_username(string_to_lower(credentials.username), user);
+  user_t existing_user{};
+  rc = get_user_by_username(string_to_lower(credentials.username), existing_user);
   if (rc == 1) {
     LOG_DEBUG("Username '%s' already taken!\n", credentials.username.data());
+    response = build_server_response(REGISTER, RESP_ERROR_USER_EXISTS, NULL, 0);
     return RESP_ERROR_USER_EXISTS;
   } else if (rc == -1) {
     LOG_ERROR("get_user_by_username Failed!\n");
+    response = build_server_response(REGISTER, RESP_ERROR_INTERNAL, NULL, 0);
     return RESP_ERROR_INTERNAL;
   }
 
@@ -181,6 +181,13 @@ static int register_user(message_t& request) {
   new_user.password = credentials.password;
   if (insert_user(new_user) != 0) {
     LOG_ERROR("insert_user Failure!\n");
+    response = build_server_response(REGISTER, RESP_ERROR_INTERNAL, NULL, 0);
+    return RESP_ERROR_INTERNAL;
+  }
+
+  if (build_register_response(response, new_user) != 0) {
+    LOG_ERROR("build_register_response() failed!\n");
+    response = build_server_response(REGISTER, RESP_ERROR_INTERNAL, NULL, 0);
     return RESP_ERROR_INTERNAL;
   }
 
@@ -191,13 +198,15 @@ static int register_user(message_t& request) {
  * Logs a user in given their credentials in the request message.
  * 
  * @param conn Connection associated with the client we're serving.
- * @param msg Request message that represents the login request.
+ * @param request Populated request message that represents the login request.
+ * @param response Empty response message that the callee will modify with information.
  * @return 0 on success, otherwise a response code.
  */
-static int login_user(conn_t& conn, message_t& request) {
+static int login_user(conn_t& conn, message_t& request, message_t& response) {
   login_credentials_t credentials{};
   int rc = parse_login_request(request, credentials);
   if (rc != 0) {
+    response = build_server_response(LOGIN, static_cast<response_code_t>(rc), NULL, 0);
     return rc;
   }
   
@@ -207,20 +216,29 @@ static int login_user(conn_t& conn, message_t& request) {
   if (rc != 1) {
     if (rc == 0) {
       LOG_DEBUG("User with username '%s' not found\n", credentials.username.data());
+      response = build_server_response(LOGIN, RESP_ERROR_USER_NOT_FOUND, NULL, 0);
       return RESP_ERROR_USER_NOT_FOUND;
     } else {
       LOG_ERROR("get_user_by_username() Failed!\n");
+      response = build_server_response(LOGIN, RESP_ERROR_INTERNAL, NULL, 0);
       return RESP_ERROR_INTERNAL;
     }
   }
 
   if (user.password != credentials.password) {
     LOG_DEBUG("Invalid password for user '%s'\n", credentials.username.data());
+    response = build_server_response(LOGIN, RESP_ERROR_INVALID_CREDENTIALS, NULL, 0);
     return RESP_ERROR_INVALID_CREDENTIALS;
   }
 
   // Update/authenticate the user in the connection table
   authenticate_connection(conn.fd, user);
+
+  if (build_login_response(response, user) != 0) {
+    LOG_ERROR("build_login_response() failed!\n");
+    response = build_server_response(LOGIN, RESP_ERROR_INTERNAL, NULL, 0);
+    return RESP_ERROR_INTERNAL;
+  }
 
   return RESP_OK;
 }
@@ -228,46 +246,77 @@ static int login_user(conn_t& conn, message_t& request) {
 /**
  * Handles sending a message to remote peers.
  * @param conn Connection associated with the TCP connection socket with the client sending this broadcast.
- * @param msg Broadcast request message containing the broadcast request.
+ * @param epollfd Fd associated with the epoll instance we're using.
+ * @param request Request message containing the broadcast request.
+ * @param response Response message that the callee will populate with data about the result of this operation.
  * @return 0 on success, non-zero return code otherwise.
  */
-static int handle_broadcast_message(conn_t& conn, message_t& request) {
+static int handle_broadcast_message(conn_t& conn, int epollfd, message_t& request, message_t& response) {
   tlv_tag_t broadcast_tag = peek_broadcast_type(request);
   switch (broadcast_tag) {
     case TAG_WORLD_BROADCAST: {      
-      // Parse request and build world broadcast; write the response message into a buffer
       world_broadcast_t broadcast{};
-      message_t response{};
-      if (parse_world_broadcast(request, broadcast) != 0) {
-        return RESP_ERROR_INTERNAL;
+      
+      // 1. Parse the user's broadcast request to get the broadcast information.
+      int ret = parse_world_broadcast(request, broadcast);
+      if (ret != 0) {
+        LOG_ERROR("parse_world_broadcast Failure!\n");
+        response = build_server_response(CHAT, static_cast<response_code_t>(ret), NULL, 0);
+        return ret;
       }
-      build_world_broadcast_notification(response, broadcast);
+
+      // Use broadcast to create a broadcast response
+      // NOTE: Broadcast response sent to all other clients will also be the response for the sender.
+      ret = build_world_broadcast_notification(response, broadcast);
+      if (ret != 0) {
+        LOG_ERROR("build_world_broadcast_notification Failure!\n");
+        response = build_server_response(CHAT, static_cast<response_code_t>(ret), NULL, 0);
+        return ret;
+      }
+
+      // Write serialized response data into recipient outgoing buffers.
+      // NOTE: Skip the sender, because after this function returns, we'll add this response to the 
+      // sender's outgoing buffer. If you don't skip the sender you're going to send the world-message twice.
+      // So skip the sender, closed connections (nullptr), and unauthenticated (conn_t::user == nullptr)
       std::vector<uint8_t> serialized_response;
       write_message_to_buffer(serialized_response, response);
-
-      // Write serialized response data into all valid buffers
       for (size_t i = 0; i < conn_table.size(); i++) {
         // If looking at the sender, connection slot is closed, or user isn't authentcated, then SKIP
-        if (i == (size_t)conn.fd || conn_table[i] == nullptr || conn_table[i]->user == nullptr) {
+        if (i == static_cast<size_t>(conn.fd) || conn_table[i] == nullptr || conn_table[i]->user == nullptr) {
           continue;
         }
-        std::vector<uint8_t>& output_buffer = conn_table[i]->outgoing;
-        output_buffer.insert(output_buffer.end(), serialized_response.begin(), serialized_response.end());
+
+        // NOTE: Need to set the recipient connections to a writing state to send them data.
+        buf_append(conn_table[i]->outgoing, serialized_response.data(), serialized_response.size());
+        set_connection_state(epollfd, conn, false);
       }
       break;
     }
     case TAG_P2P_BROADCAST: {
-      // Parse P2P broadcast request and build broadcast 
+      // 1. Parse the sender's broadcast request into something readable.
       p2p_broadcast_t broadcast{};
-      message_t response{};
-      if (parse_p2p_broadcast(request, broadcast) != 0) {
-        return RESP_ERROR_INTERNAL;
+      int ret = parse_p2p_broadcast(request, broadcast);
+      if (ret != 0) {
+        response = build_server_response(CHAT, static_cast<response_code_t>(ret), NULL, 0);
+        return ret;
       }
-      build_p2p_broadcast_notification(response, broadcast);
 
-      // Search for recipient connection in the table
+      // 2. Create the broadcast response message that we'll send to the peer.
+      // NOTE: The response message sent to the peer will also act as the response message to the 
+      // client's P2P broadcast request.
+      ret = build_p2p_broadcast_notification(response, broadcast);
+      if (ret != 0) {
+        LOG_ERROR("build_p2p_broadcast_notification Failure!\n");
+        response = build_server_response(CHAT, static_cast <response_code_t>(ret), NULL, 0);
+        return ret;
+      }
+
+      // Search for the recipient connection in the table
+      // NOTE: 
+      // a. Again skip the sender, closed connections (nullptr), and unauthenticated connections.
+      // b. Only match the connection whose username is equal to the broadcast recipient username.
       conn_t* recipient_conn = nullptr;
-      for (size_t i = 0; i < conn_table.capacity(); i++) {
+      for (size_t i = 0; i < conn_table.size(); i++) {
         // If looking at the sender, connection slot is closed, or user isn't authentcated, then SKIP
         if (i == (size_t)conn.fd || conn_table[i] == nullptr || conn_table[i]->user == nullptr) {
           continue;
@@ -278,18 +327,23 @@ static int handle_broadcast_message(conn_t& conn, message_t& request) {
         }
       }
       if (recipient_conn == nullptr) {
+        response = build_server_response(CHAT, RESP_ERROR_USER_NOT_FOUND, NULL, 0);
         return RESP_ERROR_USER_NOT_FOUND;
       }
-      
-      // Get serialized response and write it to the output buffer
+
+      // Send the broadcast to the recipient. 
+      // NOTE: This function will return, allowing the caller to have the response.
+      // Then the caller will handle serializing this response again and sending it to the client's outgoing buffer.
       std::vector<uint8_t> serialized_response;
       write_message_to_buffer(serialized_response, response);
-      std::vector<uint8_t>& output_buffer = recipient_conn->outgoing;
-      output_buffer.insert(output_buffer.end(), serialized_response.begin(), serialized_response.end());
+      buf_append(recipient_conn->outgoing, serialized_response.data(), serialized_response.size());
+      set_connection_state(epollfd, *recipient_conn, false);
       break;
     }
     default:
       LOG_WARN("Received unknown broadcast tag '%d'. Skipping request!\n", broadcast_tag);
+      response = build_server_response(CHAT, RESP_ERROR_UNKNOWN_COMMAND, NULL, 0);
+      return RESP_ERROR_UNKNOWN_COMMAND;
   }
 
   return RESP_OK;
@@ -302,50 +356,57 @@ static int handle_broadcast_message(conn_t& conn, message_t& request) {
 /**
  * Attempts to serve one request message for the given connection
  * @param conn Connection that we're trying to serve one message from.
+ * @param epollfd Epollfd that's needed when we're handling a broadcast request.
  * @return true when we're able to serve one request, otherwise false.
  */
-static bool try_one_request(conn_t& conn) {
+static bool try_one_request(conn_t& conn, int epollfd) {
   // Don't proceed if we don't have message header + 1 byte of payload yet.
   if (conn.incoming.size() < MSG_HEADER_SIZE + 1) {
     return false;
   }
 
-  // NOTE: At this point you knwo that message_t::payload points somewhere in conn_t::incoming
-  message_t message;
-  parse_message(conn.incoming, message);
-  if (message.payload_length > MSG_MAX_PAYLOAD_SIZE) {
+  message_t request;
+  parse_message(conn.incoming, request);
+  if (request.payload_length > MSG_MAX_PAYLOAD_SIZE) {
     LOG_ERROR("Message payload size was too big. Closing connection!\n");
     conn.want_close = true;
     return false;
   }
   
   // Don't proceed if we don't have at least a full message worth of data.
-  if (MSG_HEADER_SIZE + message.payload_length > conn.incoming.size()) {
+  if (MSG_HEADER_SIZE + request.payload_length > conn.incoming.size()) {
     return false;
   }
 
-  int result;
-  switch (message.type) {
+  // Setup storage for the response message
+  // NOTE: At this point you know that message_t::payload points somewhere in conn_t::incoming
+  // due to parse_message handling the heavy lifting.
+  uint8_t response_payload[MSG_MAX_PAYLOAD_SIZE];
+  message_t response{};
+  response.payload = response_payload;
+  response.payload_length = 0;
+
+  switch (request.type) {
     case REGISTER:
-      result = register_user(message);
+      register_user(request, response);
       break;
     case LOGIN:
-      result = login_user(conn, message);
+      login_user(conn, request, response);
       break;
     case CHAT:
-      result = handle_broadcast_message(conn, message);
+      handle_broadcast_message(conn, epollfd, request, response);
       break;
     default:
-      LOG_WARN("Received unknown message type '%d'!\n", message.type);
-      result = RESP_ERROR_UNKNOWN_COMMAND;
+      LOG_WARN("Received unknown message type '%d'!\n", request.type);
+      response = build_server_response(request.type, RESP_ERROR_UNKNOWN_COMMAND, NULL, 0);
+      break;
   }
+  
 
   // At this point, we have successfully processed the message request.
   // We can erase the request message data from the conn_t::incoming buffer
-  buf_consume(conn.incoming, MSG_HEADER_SIZE+message.payload_length);
-  
-  // ATP the entire response message has been 
-  message_t response = build_server_response(static_cast<response_code_t>(result), NULL, 0);
+  buf_consume(conn.incoming, MSG_HEADER_SIZE+request.payload_length);
+
   write_message_to_buffer(conn.outgoing, response);
   return true; 
 }
@@ -387,7 +448,7 @@ void handle_read_connection(conn_t& conn, int epollfd) {
   // 3. Append bytes to the end of conn_t::outgoing  in try_one_request
   // 4. Erase bytes from the start of conn_t::outgoing in handle_write_connection
   // NOTE: while loop means if we read multiple requests, then we'll try to process multiple (request pipelining).
-  while (try_one_request(conn)) {};
+  while (try_one_request(conn, epollfd)) {};
 
   // If we have outgoing messages to send (due to successfully parsing a request message), 
   // then update the state machine to indicate that we want to write to the socket.
@@ -410,8 +471,13 @@ void handle_write_connection(conn_t& conn, int epollfd) {
     }
 
     buf_consume(conn.outgoing, (size_t)rv);
+
+    // NOTE: If no messages left to write, 
+    // a. Set connection to read mode
+    // b. Exit out of this function since we're done reading
     if (conn.outgoing.size() == 0) {
       set_connection_state(epollfd, conn, true);
+      return;
     }
   }
 }
@@ -438,9 +504,6 @@ void accept_all_connections(int listenfd, int epollfd) {
     
     // Add client connection to epoll instance and connection table
     add_connection(epollfd, conn_fd, client_address, client_len);
-
-
-
     LOG_DEBUG("Client connected (fd=%d)\n", conn_fd);
   }
 }

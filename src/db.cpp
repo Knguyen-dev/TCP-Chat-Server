@@ -58,8 +58,12 @@ int get_user_by_username(std::string username, user_t& user) {
   int found = 0;
   if (sqlite3_step(res) == SQLITE_ROW) {
       user.id = sqlite3_column_int(res, 0);
-      strcpy(user.username.data(), (const char*)sqlite3_column_text(res, 1));
-      strcpy(user.password.data(), (const char*)sqlite3_column_text(res, 2));
+
+      
+      const char* sql_username = (const char*)sqlite3_column_text(res, 1);
+      const char* sql_password = (const char*)sqlite3_column_text(res, 2);
+      user.username = sql_username ? sql_username : ""; // NOTE: sqlite3 can return NULL
+      user.password = sql_password ? sql_password : "";
       found = 1;
   }
 
