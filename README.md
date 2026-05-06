@@ -37,4 +37,13 @@ make run-server
 
 # Build and run the client
 make run-client
+
+### Whilst in client terminal ###
+# Register and log in on the server
+/register <your_username> <your_password>
+/login <your_username> <your_password>
+
+# World and P2P broadcasts
+/world <your_message>
+/p2p <recipient_username> <your_message>
 ```
