@@ -63,8 +63,9 @@ void accept_all_connections(int listenfd, int epollfd);
 /**
  * Initializes and starts the server at some port 
  * @param port Port number that we're starting the server on.
+*  @param is_test Integer representing whether we're running in test mode.
  * @return Descriptor for the server's listening socket on success, otherwise -1 on error.
  */
-int init_server(char* port);
+int init_server(char* port, int is_test);
 
 #endif

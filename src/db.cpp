@@ -2,8 +2,11 @@
 
 sqlite3 *db;
 
-int init_db() {
-  int rc = sqlite3_open("chat_app.db", &db);
+const char* const DB_PATH = "app.db";
+const char* const DB_TEST_PATH = "test.db";
+
+int init_db(const char* db_path) {
+  int rc = sqlite3_open(db_path, &db);
   if (rc != SQLITE_OK) {
     fprintf(stderr, "Cannot open database: %s\n", sqlite3_errmsg(db));
     return -1;
@@ -13,14 +16,17 @@ int init_db() {
                   "id INTEGER PRIMARY KEY AUTOINCREMENT, "
                   "username TEXT UNIQUE, password TEXT);";
 
-  
-  
   rc = sqlite3_exec(db, sql, 0, 0, NULL);
   return (rc == SQLITE_OK) ? 0 : -1;
 }
 
 void close_db() {
   sqlite3_close_v2(db);
+  
+  // TODO: Kind of hacky to delete the test database file like this, but it works for now.
+  if (remove(DB_TEST_PATH) != 0) {
+    fprintf(stderr, "Error deleting test database file: %s\n", strerror(errno));
+  }
 }
 
 int insert_user(user_t& user) {

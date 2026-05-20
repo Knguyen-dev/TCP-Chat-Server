@@ -27,7 +27,6 @@ static void set_nonblocking_fd(int fd) {
   }
 }
 
-
 /**
  * Updates the state of an existing connection.
  * @param epollfd File descriptor for the epoll instance that our application is using.
@@ -605,9 +604,15 @@ int open_listenfd(char *port) {
   return listenfd;
 }
 
-int init_server(char* port) {  
-  int rc = init_db();
+int init_server(char* port, int is_test) {  
+  int rc = 0;
+  if (is_test) {
+    rc = init_db(DB_TEST_PATH);
+  } else {
+    rc = init_db(DB_PATH);
+  }
   if (rc == -1) {
+    LOG_ERROR("init_db() Failed to initialize database!\n");
     return -1;
   }
   return open_listenfd(port);

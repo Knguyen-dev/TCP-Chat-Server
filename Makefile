@@ -14,6 +14,10 @@ SRC_DIR   = src
 INC_DIR   = include
 PORT     ?= 8080
 
+# Flag to indicate if we're running tests (used to conditionally compile test code)
+IS_TEST ?= 0
+ENABLE_LOGGING ?= 0
+
 # Header files (for dependency tracking)
 HEADERS   = $(wildcard $(INC_DIR)/*.hpp)
 
@@ -36,12 +40,36 @@ build-server: $(BUILD_DIR)/server.out
 build-client: $(BUILD_DIR)/client.out
 
 # Builds and runs server
+# make run-server PORT=8080 IS_TEST=1 for test mode
 run-server: build-server
-	./$(BUILD_DIR)/server.out $(PORT)
+	./$(BUILD_DIR)/server.out $(PORT) $(IS_TEST) $(ENABLE_LOGGING)
+
 
 # Builds and runs client 
 run-client: build-client
 	./$(BUILD_DIR)/client.out
+
+# Builds and runs the test suite
+# 1. Run test server in the background; wait until it's fully up before running tests.
+# 2. Run auth integration tests, alongside any other tests
+# The '-' means that even if the test binary returns a non-zero exit code, the Makefile won't stop executing.
+# This allows us to run all tests and then clean up the server, even if some tests fail.
+# 3. Cleanup testing server
+test: build-server $(BUILD_DIR)/test_auth.out
+	@echo "Starting test server (in background)..."
+	./$(BUILD_DIR)/server.out $(PORT) 1 1 &
+	sleep 2
+
+	@echo "Running auth integration tests..."
+	./$(BUILD_DIR)/test_auth.out
+
+	@echo "Cleaning up server..."
+	-pkill -f "./$(BUILD_DIR)/server.out"
+
+# Compiles the test binary if source files changed.
+$(BUILD_DIR)/test_auth.out: test/integration/test_auth.cpp src/protocol.cpp src/logger.cpp
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
 # Link object files to create server executable.
 $(BUILD_DIR)/server.out: $(SERVER_OBJS)

@@ -13,6 +13,14 @@ enum LogLevel {
 };
 
 /**
+ * Initializes the logger with the specified logging behavior.
+ * @param enable_logging If 1, logging is enabled. If 0, logging is
+ * disabled. Any other value is considered invalid and will result in an error.
+ * @return 0 on success, or -1 if an invalid value is provided.
+ */
+int init_logger(int enable_logging);
+
+/**
  * Log a message with automatic file:line info.
  * @param level Log level
  * @param file Source file name (__FILE__)

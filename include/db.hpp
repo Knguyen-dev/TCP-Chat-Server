@@ -8,11 +8,16 @@ extern "C" {
   #include <sqlite3.h>
 }
 
+// NOTE: Forward declarations for our constant globals
+extern const char* const DB_PATH;
+extern const char* const DB_TEST_PATH;
+
 /**
- * Initializes sqlite database schema and connection
+ * Initializes sqlite database schema and connection.
+ * @param db_path File path for the sqlite database file.
  * @return 0 on success, otherwise -1
  */
-int init_db();
+int init_db(const char* db_path);
 
 /**
  * Closes the database connection with Sqlite

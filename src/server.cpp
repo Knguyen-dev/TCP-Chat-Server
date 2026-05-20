@@ -5,7 +5,6 @@
 #include <signal.h>
 #include <sys/epoll.h>
 
-
 int listenfd = -1;
 
 void sigint_handler(int sigint) {
@@ -14,20 +13,26 @@ void sigint_handler(int sigint) {
     close(listenfd);
   }
   close_db();
-  exit(0);
+  exit(0); 
 }
 
 int main(int argc, char** argv) {
   int listenfd, epollfd;
   struct epoll_event ev, events[MAX_EVENTS];
   signal(SIGINT, sigint_handler);
-  if (argc != 2) {
-    LOG_ERROR("usage: %s <port>\n", argv[0]);
+  signal(SIGTERM, sigint_handler);
+  
+  if (argc != 4) {
+    LOG_ERROR("usage: %s <port> <is_test> <enable_logging>\n", argv[0]);
+    return -1;
+  }
+  if (init_logger(atoi(argv[3])) != 0) {
+    LOG_ERROR("init_logger() error: Terminating program!\n");
     return -1;
   }
 
   // Step 1: Create listenfd, epollfd, and register listenfd
-  listenfd = init_server(argv[1]);
+  listenfd = init_server(argv[1], atoi(argv[2]));
   if (listenfd < 0) {
     LOG_ERROR("init_server() error: Terminating program!\n");
     return -1;
