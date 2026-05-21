@@ -1,3 +1,5 @@
+#ifndef PROTOCOL_HPP
+#define PROTOCOL_HPP
 
 #include "shared.hpp"
 
@@ -86,6 +88,29 @@ typedef struct {
  * @return A message string representing the response code.
  */
 std::string get_response_message(response_code_t code);
+
+/**
+ * Writes a TLV into a buffer.
+ * 
+ * @param buf A double pointer to a buffer. The motivation is that with a single pointer *buf
+ *            modifications like buf += 1, doesn't update the pointer in the caller. However by 
+ *            using a double pointer, we'll be able to update the buffer pointer in the caller.
+ * @param tag The tag that we're giving the TLV; "what is it?".
+ * @param len The size of the data (in bytes from 0-255) of the value, "how many bytes is it?".
+ * @param value A pointer to the value that we want to write into the buffer
+ * @param convert_to_network 1 to convert the value into network-byte-order, otherwise 0 for no conversion.
+ *
+ * @note
+ * - Intends to mainly be a helper function to create_response.
+ * 
+ * - If len > 1, we know that the value ("payload") is a multi-byte type.
+ * 
+ * - Limitations: Since len is a uint8_t we can only represent payloads of size [0, 255] bytes. If we wanted to represent bigger payloads, 
+ * we'd simply upgrade to uint16_t, allowing us to write values of size [0, 65335] bytes, which will later be useful for messages. Of course, 
+ * if we decide to use uint16_t, we'd need to ensure the 16-bit integer is represented in network-byte-order and probably use memcpy to copy 
+ * from bytes from the integer into the buffer.
+ */
+void write_tlv(uint8_t* &buf, tlv_tag_t tag, uint8_t len, const void *value, int convert_to_network);
 
 /**
  * Append bytes to the back of a given buffer
@@ -360,3 +385,4 @@ tlv_tag_t peek_broadcast_type(message_t& request);
  */
 message_t build_server_response(uint8_t type, response_code_t rc, uint8_t *payload, uint32_t payload_len);
 
+#endif // PROTOCOL_HPP

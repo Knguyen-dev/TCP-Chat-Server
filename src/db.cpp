@@ -2,8 +2,11 @@
 
 sqlite3 *db;
 
-const char* const DB_PATH = "app.db";
-const char* const DB_TEST_PATH = "test.db";
+// Gives external linkage to our constant globals.
+// NOTE: Then in the header file, we declare these variables as `extern const char* const` 
+// which creates a forward declaration, saying they're defined elsewhere and are constant.
+extern const char* const DB_PATH = "app.db";
+extern const char* const DB_TEST_PATH = "test.db";
 
 int init_db(const char* db_path) {
   int rc = sqlite3_open(db_path, &db);

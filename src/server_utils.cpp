@@ -251,6 +251,14 @@ static int login_user(conn_t& conn, message_t& request, message_t& response) {
  * @return 0 on success, non-zero return code otherwise.
  */
 static int handle_broadcast_message(conn_t& conn, int epollfd, message_t& request, message_t& response) {
+  // If connection isn't authenticated, reject the request
+  // NOTE: Only authenticated users are allowed to send broadcasts.
+  if (conn.user == nullptr) {
+    LOG_DEBUG("Unauthenticated user attempted to send a broadcast message!\n");
+    response = build_server_response(CHAT, RESP_ERROR_INVALID_CREDENTIALS, NULL, 0);
+    return RESP_ERROR_INVALID_CREDENTIALS;
+  }
+
   tlv_tag_t broadcast_tag = peek_broadcast_type(request);
   switch (broadcast_tag) {
     case TAG_WORLD_BROADCAST: {      
@@ -262,6 +270,18 @@ static int handle_broadcast_message(conn_t& conn, int epollfd, message_t& reques
         LOG_ERROR("parse_world_broadcast Failure!\n");
         response = build_server_response(CHAT, static_cast<response_code_t>(ret), NULL, 0);
         return ret;
+      }
+
+      if (broadcast.message_content.empty()) {
+        LOG_DEBUG("Received world broadcast with empty message content!\n");
+        response = build_server_response(CHAT, RESP_ERROR_MALFORMED, NULL, 0);
+        return RESP_ERROR_MALFORMED;
+      }
+
+      if (conn.user->username != broadcast.sender_username) {
+        LOG_DEBUG("Received world broadcast, but client username doesn't match sender username!\n");
+        response = build_server_response(CHAT, RESP_ERROR_MALFORMED, NULL, 0);
+        return RESP_ERROR_MALFORMED;
       }
 
       // Use broadcast to create a broadcast response
@@ -293,12 +313,29 @@ static int handle_broadcast_message(conn_t& conn, int epollfd, message_t& reques
     }
     case TAG_P2P_BROADCAST: {
       // 1. Parse the sender's broadcast request into something readable.
-      // TODO: Usenrmae is for some reason lowercased?
       p2p_broadcast_t broadcast{};
       int ret = parse_p2p_broadcast(request, broadcast);
       if (ret != 0) {
         response = build_server_response(CHAT, static_cast<response_code_t>(ret), NULL, 0);
         return ret;
+      }
+
+      if (broadcast.message_content.empty()) {
+        LOG_DEBUG("Received p2p broadcast with empty message content!\n");
+        response = build_server_response(CHAT, RESP_ERROR_MALFORMED, NULL, 0);
+        return RESP_ERROR_MALFORMED;
+      }
+
+      if (conn.user->username != broadcast.sender_username) {
+        LOG_DEBUG("Received p2p broadcast, but client username doesn't match sender username!\n");
+        response = build_server_response(CHAT, RESP_ERROR_MALFORMED, NULL, 0);
+        return RESP_ERROR_MALFORMED;
+      }
+
+      if (conn.user->username == broadcast.recipient_username) {
+        LOG_DEBUG("Received p2p broadcast with recipient username the same as the sender username!\n");
+        response = build_server_response(CHAT, RESP_ERROR_MALFORMED, NULL, 0);
+        return RESP_ERROR_MALFORMED;
       }
 
       // 2. Create the broadcast response message that we'll send to the peer.
@@ -341,9 +378,9 @@ static int handle_broadcast_message(conn_t& conn, int epollfd, message_t& reques
       break;
     }
     default:
-      LOG_WARN("Received unknown broadcast tag '%d'. Skipping request!\n", broadcast_tag);
-      response = build_server_response(CHAT, RESP_ERROR_UNKNOWN_COMMAND, NULL, 0);
-      return RESP_ERROR_UNKNOWN_COMMAND;
+      LOG_WARN("Received unknown broadcast tag '%d'. Rejecting request!\n", broadcast_tag);
+      response = build_server_response(CHAT, RESP_ERROR_MALFORMED, NULL, 0);
+      return RESP_ERROR_MALFORMED;
   }
 
   return RESP_OK;

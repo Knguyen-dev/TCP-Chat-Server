@@ -21,26 +21,7 @@ std::string get_response_message(response_code_t code) {
   return ss.str();
 }
 
-/**
- * Writes a TLV into a buffer.
- * 
- * @param buf A double pointer to a buffer. The motivation is that with a single pointer *buf
- *            modifications like buf += 1, doesn't update the pointer in the caller. However by 
- *            using a double pointer, we'll be able to update the buffer pointer in the caller.
- * @param tag The tag that we're giving the TLV; "what is it?".
- * @param len The size of the data (in bytes from 0-255) of the value, "how many bytes is it?".
- * @param value A pointer to the value that we want to write into the buffer
- * @param convert_to_network 1 to convert the value into network-byte-order, otherwise 0 for no conversion.
- *
- * NOTE: 
- * - Intends to mainly be a helper function to create_response.
- * - If len > 1, we know that the value ("payload") is a multi-byte type.
- * - Limitations: Since len is a uint8_t we can only represent payloads of size [0, 255] bytes. If we wanted to represent bigger payloads, 
- * we'd simply upgrade to uint16_t, allowing us to write values of size [0, 65335] bytes, which will later be useful for messages. Of course, 
- * if we decide to use uint16_t, we'd need to ensure the 16-bit integer is represented in network-byte-order and probably use memcpy to copy 
- * from bytes from the integer into the buffer.
- */
-static void write_tlv(uint8_t* &buf, tlv_tag_t tag, uint8_t len, const void *value, int convert_to_network) {
+void write_tlv(uint8_t* &buf, tlv_tag_t tag, uint8_t len, const void *value, int convert_to_network) {
   
   // 1. Write tag and length (1 byte each, no flipping)
   *buf++ = static_cast<uint8_t>(tag); 
@@ -702,7 +683,6 @@ int build_p2p_broadcast(message_t& request, p2p_broadcast_t& broadcast) {
 
   return 0;
 }
-
 
 int parse_p2p_broadcast(message_t& request, p2p_broadcast_t& broadcast) {  
   uint8_t* payload_ptr = request.payload;
