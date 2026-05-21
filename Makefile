@@ -55,19 +55,26 @@ run-client: build-client
 # The '-' means that even if the test binary returns a non-zero exit code, the Makefile won't stop executing.
 # This allows us to run all tests and then clean up the server, even if some tests fail.
 # 3. Cleanup testing server
-test: build-server $(BUILD_DIR)/test_auth.out
+test: build-server $(BUILD_DIR)/test_auth.out $(BUILD_DIR)/test_broadcast.out
 	@echo "Starting test server (in background)..."
-	./$(BUILD_DIR)/server.out $(PORT) 1 1 &
+	./$(BUILD_DIR)/server.out $(PORT) 1 0 &
 	sleep 2
 
 	@echo "Running auth integration tests..."
-	./$(BUILD_DIR)/test_auth.out
+	-./$(BUILD_DIR)/test_auth.out
+
+	@echo "Running broadcast integration tests..."
+	-./$(BUILD_DIR)/test_broadcast.out
 
 	@echo "Cleaning up server..."
 	-pkill -f "./$(BUILD_DIR)/server.out"
 
 # Compiles the test binary if source files changed.
-$(BUILD_DIR)/test_auth.out: test/integration/test_auth.cpp src/protocol.cpp src/logger.cpp
+$(BUILD_DIR)/test_auth.out: test/integration/test_auth.cpp test/integration/test_utils.cpp src/protocol.cpp src/logger.cpp
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(BUILD_DIR)/test_broadcast.out: test/integration/test_broadcast.cpp test/integration/test_utils.cpp src/protocol.cpp src/logger.cpp
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
