@@ -9,11 +9,115 @@
 // Connection tables
 std::vector<conn_t *> conn_table;
 
+// -----------------------------------
+// TODO: Metrics
+// -----------------------------------
+
+MemoryMetrics get_memory_usage() {
+    std::ifstream statm("/proc/self/statm");
+    long vm_pages{0};
+    long rss_pages{0};
+    if (statm >> vm_pages >> rss_pages) {
+        long page_size = sysconf(_SC_PAGESIZE); // Typically 4096 bytes
+        return { vm_pages * page_size, rss_pages * page_size };
+    }
+    return {0, 0};
+}
+
+void log_server_metrics() {
+
+  // 1. Get number of unauth and auth connections
+  int num_connected{0};
+  int num_auth{0};
+  for (conn_t* conn : conn_table) {
+    if (conn == nullptr) {
+      continue;
+    }
+    if (conn->user != nullptr) {
+      num_auth++;
+    }
+    num_connected++;
+  }
+
+  // 2. Get virtual and physical memory usage
+  MemoryMetrics mem{get_memory_usage()};
+
+  // 3. Get heap usage data.
+  struct mallinfo2 mi = mallinfo2();
+
+  char buf[512];
+  int offset = 0;
+  offset += snprintf(buf + offset, sizeof(buf) - offset,
+      "Num connections = %d, num auth = %d\n",
+      num_connected, num_auth);
+  offset += snprintf(buf + offset, sizeof(buf) - offset,
+      "Physical RAM Usage (bytes) = %zu\n", 
+      mem.physical_ram_bytes);
+  offset += snprintf(buf + offset, sizeof(buf) - offset,
+      "Heap Used = %ld bytes, heap free = %ld bytes, total heap = %ld\n",
+      mi.uordblks, mi.fordblks, mi.arena);
+
+  LOG_INFO("%s\n", buf);
+}
+
+int handle_server_input() {
+  std::string command_buffer;
+  char buf[128];
+  bool input_complete = false;
+  while (true) {
+    ssize_t bytes_read = read(STDIN_FILENO, buf, sizeof(buf)-1);
+    if (bytes_read <= 0) {
+      if (bytes_read == 0) {
+        LOG_INFO("Stdin closed!\n");
+        break; 
+      }
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        // We have read all currently available data from the buffer
+        break;
+      } else if (errno == EINTR) {
+        // Interrupted by a signal, try reading again
+        continue;
+      } else {
+        LOG_ERROR("Read error on stdin\n");
+        break;
+      } 
+    }
+    buf[bytes_read] = '\0';
+    command_buffer += buf;
+    // Check if the user hit 'Enter' (newline indicates the end of the command)
+    if (command_buffer.back() == '\n') {
+        input_complete = true;
+    }
+  }
+
+  if (!input_complete) {
+    LOG_WARN("Input not complete: Aborting command pipeline!\n");
+    return -1;
+  }
+
+  if (!command_buffer.empty() && command_buffer.back() == '\n') {
+    command_buffer.pop_back();
+  }
+  
+  if (command_buffer == "/metrics") {
+    // Call your metrics function here!
+    log_server_metrics(); 
+    return 0;
+  } else {
+    LOG_INFO("Unknown server command: %s\n", command_buffer.c_str());
+    return -1;
+  }
+}
+
+// -----------------------------------
+// Fd and Utils
+// -----------------------------------
+
 /**
  * Makes a socket associated with a file descriptor nonblocking
  * @param fd The file descriptor associated with the socket.
  */
-static void set_nonblocking_fd(int fd) {
+void set_nonblocking_fd(int fd) {
   int flags = fcntl(fd, F_GETFL, 0);
   if (flags == -1) {
     LOG_ERROR("fcntl error: %s\n", strerror(errno));

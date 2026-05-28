@@ -4,27 +4,25 @@
 
 #include <sys/epoll.h> // for epoll readiness API
 
+#include <fstream>
+#include <unistd.h>
+#include <malloc.h>
+#include <string>
+
+
 #define LISTENQ 100
 #define MAX_EVENTS 64
 
-// Connection table; exposing this so that the client can run a loop.
-// TODO: May not be necessary!
 extern std::vector<conn_t*> conn_table;
 
+struct MemoryMetrics {
+    long virtual_mem_bytes;
+    long physical_ram_bytes;
+};
 
-// TODO: Maybe will implement this later for cleaniness and to reinforce clean code
-// not necessary for now
-// /**
-//  * Struct representing the state of the server.
-//  * - listenfd: The fd for the listening socket.
-//  * - epollfd: The fd of the epoll instance the server is using.
-//  * - conn_table: Vector of pointers, where each one points to a client connection.
-//  */
-// struct server_state_t {
-//   int listenfd{-1};
-//   int epollfd{-1};  
-//   std::vector<conn_t*> conn_table;
-// };
+int handle_server_input();
+
+void set_nonblocking_fd(int fd);
 
 /**
  * Handles reading data from and serving the connection

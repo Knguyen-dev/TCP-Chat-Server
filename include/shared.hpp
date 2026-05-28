@@ -36,8 +36,8 @@
 // Struct representing a user in our application.
 typedef struct {
   uint32_t id;          // Incrementing ID associated with the user.
-  std::string username; // Username of the user.
-  std::string password; // Plain-text password for the user.
+  std::string username; // Username of the user (typically 32 bytes)
+  std::string password; // Plain-text password for the user (typically 32 bytes)
 } user_t;
 
 // -----------------------------------

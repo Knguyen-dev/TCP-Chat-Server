@@ -1,3 +1,5 @@
 build
 *.db
 .vscode
+.perf.data
+writeups
