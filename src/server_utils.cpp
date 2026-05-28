@@ -719,15 +719,17 @@ int open_listenfd(char *port) {
     }
   }
 
-  freeaddrinfo(listp);
   if (!p) {
     LOG_ERROR("open_listenfd error: No suitable addresses found!\n");
+    freeaddrinfo(listp);
     return -1;
   }
 
+  // Fix our listening socket on that
   set_nonblocking_fd(listenfd);
   if (listen(listenfd, LISTENQ) < 0) {
     LOG_ERROR("open_listenfd listen error: Error opening the listening socket!\n");
+    freeaddrinfo(listp);
     close(listenfd);
     return -1;
   }
@@ -742,6 +744,7 @@ int open_listenfd(char *port) {
     printf("Couldn't get server IP:port, but server should be running!\n");
   }
   
+  freeaddrinfo(listp);
   return listenfd;
 }
 
