@@ -1,5 +1,6 @@
 build
 *.db
 .vscode
-.perf.data
+perf.data
 writeups
+*.log

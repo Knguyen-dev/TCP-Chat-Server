@@ -725,7 +725,7 @@ int open_listenfd(char *port) {
     return -1;
   }
 
-  // Fix our listening socket on that
+  // Fix our listening socket on that port
   set_nonblocking_fd(listenfd);
   if (listen(listenfd, LISTENQ) < 0) {
     LOG_ERROR("open_listenfd listen error: Error opening the listening socket!\n");
