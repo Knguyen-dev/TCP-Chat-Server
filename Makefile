@@ -14,9 +14,12 @@ SRC_DIR   = src
 INC_DIR   = include
 PORT     ?= 8080
 
+VALGRIND_FLAGS = --tool=memcheck --leak-check=full --show-leak-kinds=all --track-origins=yes
+ASAN_FLAGS = -fsanitize=address -fno-omit-frame-pointer -g
+
 # Flag to indicate if we're running tests (used to conditionally compile test code)
 IS_TEST ?= 0
-ENABLE_LOGGING ?= 0
+ENABLE_LOGGING ?= 1
 
 # Header files (for dependency tracking)
 HEADERS   = $(wildcard $(INC_DIR)/*.hpp)
@@ -44,10 +47,27 @@ build-client: $(BUILD_DIR)/client.out
 run-server: build-server
 	./$(BUILD_DIR)/server.out $(PORT) $(IS_TEST) $(ENABLE_LOGGING)
 
-
 # Builds and runs client 
 run-client: build-client
 	./$(BUILD_DIR)/client.out
+
+kill:
+	-pkill -f "./$(BUILD_DIR)/server.out"
+
+# Debug the load test target (automatically handles the background server)
+debug-load-test:
+	@echo "Building server and load test with debug symbols..."
+	@$(MAKE) DEBUG=1 clean
+	@$(MAKE) DEBUG=1 build-server $(BUILD_DIR)/test_load.out
+	@echo "Starting test server in background..."
+	./$(BUILD_DIR)/server.out $(PORT) 1 0 & \
+	SERVER_PID=$$!; \
+	sleep 2; \
+
+	@echo "Launching GDB on load test..."
+	-gdb ./$(BUILD_DIR)/test_load.out
+	@echo "Cleaning up server (PID $(SERVER_PID))..."
+	-pkill -f "./$(BUILD_DIR)/server.out"
 
 # Builds and runs the test suite
 # 1. Run test server in the background; wait until it's fully up before running tests.
@@ -55,10 +75,12 @@ run-client: build-client
 # The '-' means that even if the test binary returns a non-zero exit code, the Makefile won't stop executing.
 # This allows us to run all tests and then clean up the server, even if some tests fail.
 # 3. Cleanup testing server
+# NOTE: We use sigint instead of sigkill, because if you do the latter, valgrind won't be able to 
+# send its final memory report. Also we have valgrind running on the tests as well just to check.
 test: build-server $(BUILD_DIR)/test_auth.out $(BUILD_DIR)/test_broadcast.out
 	@echo "Starting test server (in background)..."
-	./$(BUILD_DIR)/server.out $(PORT) 1 0 &
-	sleep 2
+	valgrind $(VALGRIND_FLAGS) --log-file=valgrind_server_test.log ./$(BUILD_DIR)/server.out $(PORT) 1 0 &
+	sleep 3 # Increased sleep to 3s to give Valgrind time to initialize the binary
 
 	@echo "Running auth integration tests..."
 	-./$(BUILD_DIR)/test_auth.out
@@ -67,7 +89,35 @@ test: build-server $(BUILD_DIR)/test_auth.out $(BUILD_DIR)/test_broadcast.out
 	-./$(BUILD_DIR)/test_broadcast.out
 
 	@echo "Cleaning up server..."
+	-pkill -SIGINT -f "./$(BUILD_DIR)/server.out"
+
+
+load-test: build-server $(BUILD_DIR)/test_load.out
+	@echo "Starting test server (in background)..."
+	./$(BUILD_DIR)/server.out $(PORT) 1 0 &
+	sleep 2
+
+	@echo "Running load testing script..."
+	- ./$(BUILD_DIR)/test_load.out
+
+# Shouldn't need to run but yeah.
+	@echo "Cleaning up server..."
 	-pkill -f "./$(BUILD_DIR)/server.out"
+
+
+build-benchmark: ./test/benchmark/benchmark_test.cpp 
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) -O3 -g -std=c++17 $< -o ./$(BUILD_DIR)/benchmark_test.out -lbenchmark -lpthread -fno-omit-frame-pointer
+
+run-benchmark: build-benchmark
+	sudo perf stat ./$(BUILD_DIR)/benchmark_test.out	
+
+# Or: sudo perf stat ./build/benchmark_test.out
+# sudo perf stat -e cache-references,cache-misses,branches,branch-misses,instructions,cycles ./build/benchmark_test.out --benchmark_filter=Embedded
+
+run-perf: build-benchmark
+	sudo perf record -g ./$(BUILD_DIR)/benchmark_test.out
+	sudo perf report -g 'graph,0.5,caller'
 
 # Compiles the test binary if source files changed.
 $(BUILD_DIR)/test_auth.out: test/integration/test_auth.cpp test/integration/test_utils.cpp src/protocol.cpp src/logger.cpp
@@ -75,6 +125,10 @@ $(BUILD_DIR)/test_auth.out: test/integration/test_auth.cpp test/integration/test
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(BUILD_DIR)/test_broadcast.out: test/integration/test_broadcast.cpp test/integration/test_utils.cpp src/protocol.cpp src/logger.cpp
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(BUILD_DIR)/test_load.out: test/load/test_load.cpp src/shared.cpp src/protocol.cpp src/logger.cpp test/integration/test_utils.cpp
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
@@ -100,7 +154,7 @@ debug-server:
 	@echo "Building server with debug symbols..."
 	@$(MAKE) DEBUG=1 clean
 	@$(MAKE) DEBUG=1 build-server
-	gdb --args ./$(BUILD_DIR)/server.out $(PORT)
+	gdb --args ./$(BUILD_DIR)/server.out $(PORT) 0 1
 
 debug-client:
 	@echo "Building client with debug symbols..."

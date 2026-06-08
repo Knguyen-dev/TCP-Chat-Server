@@ -10,6 +10,9 @@
 #include <unordered_map>
 #include <chrono>
 
+
+bool has_spammer{false};
+
 struct TelemetryTracker {
   std::chrono::high_resolution_clock::time_point t0;
   std::string message_content;
@@ -181,33 +184,26 @@ bool try_server_response(TestClient& client, int epollfd) {
       }
       break;
     case LOGIN:
-      // If login worked AND we're in the login state
-      // a. Transition into spammer or idle state.
-      // b. Spammers will write whilst idles won't. However both will read for responses or notifications.
-      // c. Update the epoll interest of everyone.
-      // Otherwise, login somehow failed so close the connection.
-      if (response.rc == RESP_OK && client.state == ClientState::WAIT_LOGIN_ACK) {
-        // The first client becomes the spammer
-        if (client.conn.fd == 4) {
-            client.state = ClientState::SPAMMER;
-            client.conn.want_write = true;
-            client.conn.want_read = true;
-            uint32_t events = EPOLLIN | EPOLLOUT;
-            update_epoll_interest(epollfd, client, events);
-            LOG_INFO("User Login fd=%d\n", client.conn.fd);
-        } else {
-            client.state = ClientState::IDLE;
-            client.conn.want_write = false;
-            client.conn.want_read = true;
-            uint32_t events = EPOLLIN;
-            update_epoll_interest(epollfd, client, events);
-        }
-
-        num_authenticated_connections++;
-      } else {
+      if (response.rc != RESP_OK || client.state != ClientState::WAIT_LOGIN_ACK) {
         LOG_ERROR("Login failed for fd %d\n", client.conn.fd);
         client.conn.want_close = true;
+        break;
+      }      
+      if (has_spammer) {
+        client.state = ClientState::IDLE;
+        client.conn.want_write = false;
+        client.conn.want_read = true;
+        uint32_t events = EPOLLIN;
+        update_epoll_interest(epollfd, client, events);
+      } else {
+        client.state = ClientState::SPAMMER;
+        client.conn.want_write = true;
+        client.conn.want_read = true;
+        uint32_t events = EPOLLIN | EPOLLOUT;
+        update_epoll_interest(epollfd, client, events);
+        LOG_INFO("User Login fd=%d\n", client.conn.fd);
       }
+      num_authenticated_connections++;
       break;
     case CHAT: {
       auto t1 = std::chrono::high_resolution_clock::now();
@@ -396,19 +392,19 @@ int main() {
   int epollfd = epoll_create1(0);
   if (epollfd == -1) return -1;
 
-  // int target_connections = 100000;
-  int current_connections = 0;
-  int batch_size = 10000;
+
+  int current_num_connections = 0;
+  int TARGET_NUM_CONNECTIONS = 10000;
+  int BATCH_SIZE = 150;
+  int EPOLL_DELAY_MS = 10; // paces our program
 
   // Seed initial batch of connection requests
-  for (int i = 0; i < batch_size; i++) {
-    if (connect_test_client(epollfd) >= 0) current_connections++;
+  for (int i = 0; i < TARGET_NUM_CONNECTIONS; i++) {
+    if (connect_test_client(epollfd) >= 0) current_num_connections++;
   }
   
   while (true) {
-
-    // 10ms timeout for pacing
-    int num_ready_fds = epoll_wait(epollfd, events, MAX_EVENTS, 10); 
+    int num_ready_fds = epoll_wait(epollfd, events, MAX_EVENTS, EPOLL_DELAY_MS); 
     if (num_ready_fds == -1) {
       if (errno == EINTR) continue;
       return -1;
@@ -417,7 +413,6 @@ int main() {
     for (int i = 0; i < num_ready_fds; i++) {
       int fd = events[i].data.fd;
       TestClient& client = client_table[fd];
-
       if (events[i].events & EPOLLIN) {
         handle_client_read(client, epollfd);
       }
@@ -426,24 +421,24 @@ int main() {
       }
       if (client.conn.want_close || (events[i].events & (EPOLLHUP | EPOLLERR))) {
         close_client(epollfd, client);
-        current_connections--;
-
+        current_num_connections--;
         // Decrement number of authenticated connections if needed.
         if (client.state == ClientState::IDLE || client.state == ClientState::SPAMMER) {
           num_authenticated_connections--;
         }
       }
     }
-
-    // Slowly add more connections to meet our target number
-    // Adds connections in batches.
-    // if (current_connections < target_connections) {
-    //   int space = target_connections - current_connections;
-    //   int to_inject = std::min(space, batch_size);
-    //   for (int i = 0; i < to_inject; i++) {
-    //      if (connect_test_client(epollfd) >= 0) current_connections++;
-    //   }
-    //   printf("current connections: %d\n", current_connections);
-    // }
+  
+    // Gradually add more connections to meet the target number
+    if (current_num_connections < TARGET_NUM_CONNECTIONS) {
+      int remaining_num_connections = TARGET_NUM_CONNECTIONS - current_num_connections;
+      int num_to_inject = std::min(remaining_num_connections, BATCH_SIZE);
+      for (int i{0}; i < num_to_inject; i++) {
+        if (connect_test_client(epollfd) >= 0) {
+          current_num_connections++;
+        }
+      }
+      printf("Current Number of Connection: %d\n", current_num_connections);
+    }
   }
 }
