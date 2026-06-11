@@ -38,6 +38,6 @@ int insert_user(user_t& user);
  * @param user Empty struct that'll be populated with user information if a user is found.
  * @return 1 if user was found, 0 if they didn't exist, and -1 if we had an error.
  */
-int get_user_by_username(std::string username, user_t& user);
+int get_user_by_username(const std::string& username, user_t& user);
 
 #endif

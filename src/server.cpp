@@ -95,15 +95,18 @@ int main(int argc, char** argv) {
       // NOTE: After reading, the connection may be in write state as well. 
       // Though, it hasn't been given the "ok" by the epoll to write, so it 
       // could block immediately, or we could have a lucky break to be able to write immediately.
-      conn_t* conn = conn_table[events[i].data.fd];
-      if (conn->want_read) {
-        handle_read_connection(*conn, epollfd);
-      } 
-      if (conn->want_write) {
-        handle_write_connection(*conn, epollfd);
+      // NOTE 2: current_flags needs to be a pointer or reference as handle_read_connection might 
+      // update the flags and make it writeable all within one iteration of the for loop.
+      ConnFlags& current_flags = conn_manager.flags[events[i].data.fd]; 
+      int current_fd = events[i].data.fd;
+      if (has_flag(current_flags, ConnFlags::WANT_READ)) {
+        handle_read_connection(current_fd, epollfd);
       }
-      if ((events[i].events & EPOLLERR) || conn->want_close) {
-        remove_connection(conn->fd, epollfd);
+      if (has_flag(current_flags, ConnFlags::WANT_WRITE)) {
+        handle_write_connection(current_fd, epollfd);
+      }
+      if ((events[i].events & EPOLLERR) || has_flag(current_flags, ConnFlags::WANT_CLOSE)) {
+        remove_connection(current_fd, epollfd);
       }
     }   
   }

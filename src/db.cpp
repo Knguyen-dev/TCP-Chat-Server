@@ -45,7 +45,7 @@ int insert_user(user_t& user) {
   int step = sqlite3_step(res);
   if (step == SQLITE_DONE) {
     // Get the ID that was just generated automatically
-    user.id = (uint32_t)sqlite3_last_insert_rowid(db);
+    user.user_id = (uint32_t)sqlite3_last_insert_rowid(db);
     sqlite3_finalize(res);
     return 0;
   }
@@ -54,7 +54,7 @@ int insert_user(user_t& user) {
   return -1;
 }
 
-int get_user_by_username(std::string username, user_t& user) {
+int get_user_by_username(const std::string& username, user_t& user) {
   sqlite3_stmt *res;
   const char *sql = "SELECT id, username, password FROM users WHERE LOWER(username) = ?;";
 
@@ -66,9 +66,7 @@ int get_user_by_username(std::string username, user_t& user) {
   sqlite3_bind_text(res, 1, username.c_str(), -1, SQLITE_STATIC);
   int found = 0;
   if (sqlite3_step(res) == SQLITE_ROW) {
-      user.id = sqlite3_column_int(res, 0);
-
-      
+      user.user_id = sqlite3_column_int(res, 0);
       const char* sql_username = (const char*)sqlite3_column_text(res, 1);
       const char* sql_password = (const char*)sqlite3_column_text(res, 2);
       user.username = sql_username ? sql_username : ""; // NOTE: sqlite3 can return NULL

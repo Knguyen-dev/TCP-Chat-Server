@@ -1,6 +1,37 @@
 #include "shared.hpp"
 
 
+static uint8_t to_utype(ConnFlags f) {
+  return static_cast<uint8_t>(f);
+}
+
+ConnFlags operator|(ConnFlags lhs, ConnFlags rhs) {
+  return static_cast<ConnFlags>(to_utype(lhs) | to_utype(rhs));
+}
+
+ConnFlags operator&(ConnFlags lhs, ConnFlags rhs) {
+  return static_cast<ConnFlags>(to_utype(lhs) & to_utype(rhs));
+}
+
+ConnFlags operator~(ConnFlags flag) {
+  return static_cast<ConnFlags>(~to_utype(flag));
+}
+
+ConnFlags operator|=(ConnFlags& lhs, ConnFlags rhs) {
+  lhs = lhs | rhs;
+  return lhs;
+}
+
+ConnFlags operator&=(ConnFlags& lhs, ConnFlags rhs) {
+  lhs = lhs & rhs;
+  return lhs;
+}
+
+// Helper for checking flags: returns true if the flag is set
+bool has_flag(ConnFlags mask, ConnFlags flag) {
+    return (static_cast<uint8_t>(mask) & static_cast<uint8_t>(flag)) != 0;
+}
+
 int get_valid_input_range(std::string_view prompt, int min, int max) {
   int value;
   int status;
@@ -56,7 +87,6 @@ void die(const char *msg) {
   fprintf(stderr, "[%d] %s\n", errno, msg);
   abort();
 }
-
 
 void ignore_line() {
   std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');

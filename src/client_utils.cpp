@@ -202,7 +202,7 @@ static void handle_registration_response(message_t& response) {
   }
   LOG_INFO(
     "[Registration]: Successful, <User id=%d, username=%s>\n", 
-    user.id, user.username.data()
+    user.user_id, user.username.data()
   );
 }
 
@@ -226,7 +226,7 @@ static void handle_login_response(conn_t& conn, message_t& response) {
     LOG_ERROR("parse_login_response() failed!\n");
     return;
   }
-  LOG_INFO("[Login]: Successful, <User id=%d, username=%s>\n", user.id, user.username.data());
+  LOG_INFO("[Login]: Successful, <User id=%d, username=%s>\n", user.user_id, user.username.data());
 
   /*
   TODO: Segmentation fault happens here
@@ -237,7 +237,7 @@ static void handle_login_response(conn_t& conn, message_t& response) {
   */
 
   user_t* new_user = new user_t();
-  new_user->id = user.id;
+  new_user->user_id = user.user_id;
   new_user->username = user.username;
   std::lock_guard<std::mutex> lock(g_conn_mutex);
   g_client_conn->user = new_user;
@@ -515,7 +515,6 @@ int create_client_connection(char* ip, short port, conn_t& conn) {
     return -1;
   }
 
-  memcpy(&conn.addr, &server_addr, sizeof(server_addr));
   conn.fd = fd;
   return fd;
 }

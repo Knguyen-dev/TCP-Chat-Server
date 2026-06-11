@@ -54,20 +54,11 @@ run-client: build-client
 kill:
 	-pkill -f "./$(BUILD_DIR)/server.out"
 
-# Debug the load test target (automatically handles the background server)
-debug-load-test:
-	@echo "Building server and load test with debug symbols..."
-	@$(MAKE) DEBUG=1 clean
-	@$(MAKE) DEBUG=1 build-server $(BUILD_DIR)/test_load.out
-	@echo "Starting test server in background..."
-	./$(BUILD_DIR)/server.out $(PORT) 1 0 & \
-	SERVER_PID=$$!; \
-	sleep 2; \
 
-	@echo "Launching GDB on load test..."
-	-gdb ./$(BUILD_DIR)/test_load.out
-	@echo "Cleaning up server (PID $(SERVER_PID))..."
-	-pkill -f "./$(BUILD_DIR)/server.out"
+
+
+
+
 
 # Builds and runs the test suite
 # 1. Run test server in the background; wait until it's fully up before running tests.
@@ -77,7 +68,7 @@ debug-load-test:
 # 3. Cleanup testing server
 # NOTE: We use sigint instead of sigkill, because if you do the latter, valgrind won't be able to 
 # send its final memory report. Also we have valgrind running on the tests as well just to check.
-test: build-server $(BUILD_DIR)/test_auth.out $(BUILD_DIR)/test_broadcast.out
+integration-tests: build-server $(BUILD_DIR)/test_auth.out $(BUILD_DIR)/test_broadcast.out
 	@echo "Starting test server (in background)..."
 	valgrind $(VALGRIND_FLAGS) --log-file=valgrind_server_test.log ./$(BUILD_DIR)/server.out $(PORT) 1 0 &
 	sleep 3 # Increased sleep to 3s to give Valgrind time to initialize the binary
@@ -91,7 +82,6 @@ test: build-server $(BUILD_DIR)/test_auth.out $(BUILD_DIR)/test_broadcast.out
 	@echo "Cleaning up server..."
 	-pkill -SIGINT -f "./$(BUILD_DIR)/server.out"
 
-
 load-test: build-server $(BUILD_DIR)/test_load.out
 	@echo "Starting test server (in background)..."
 	./$(BUILD_DIR)/server.out $(PORT) 1 0 &
@@ -100,9 +90,9 @@ load-test: build-server $(BUILD_DIR)/test_load.out
 	@echo "Running load testing script..."
 	- ./$(BUILD_DIR)/test_load.out
 
-# Shouldn't need to run but yeah.
 	@echo "Cleaning up server..."
 	-pkill -f "./$(BUILD_DIR)/server.out"
+
 
 
 build-benchmark: ./test/benchmark/benchmark_test.cpp 
@@ -119,7 +109,8 @@ run-perf: build-benchmark
 	sudo perf record -g ./$(BUILD_DIR)/benchmark_test.out
 	sudo perf report -g 'graph,0.5,caller'
 
-# Compiles the test binary if source files changed.
+
+##### Compile Integration, Load, and Unit Tests #####
 $(BUILD_DIR)/test_auth.out: test/integration/test_auth.cpp test/integration/test_utils.cpp src/protocol.cpp src/logger.cpp
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
@@ -129,6 +120,14 @@ $(BUILD_DIR)/test_broadcast.out: test/integration/test_broadcast.cpp test/integr
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(BUILD_DIR)/test_load.out: test/load/test_load.cpp src/shared.cpp src/protocol.cpp src/logger.cpp test/integration/test_utils.cpp
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+unit-tests: $(BUILD_DIR)/test_shared.out
+	@echo "Running shared.cpp unit tests"
+	- ./$(BUILD_DIR)/test_shared.out
+
+$(BUILD_DIR)/test_shared.out: test/unit/test_shared.cpp src/shared.cpp
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
@@ -149,13 +148,30 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp $(HEADERS)
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@ $(LDFLAGS)
 
-# Debug targets - properly rebuild with debug flags
+##### Run Debugging Scripts #####
+# Debug the load test script (automatically handles the background server)
+debug-load-test:
+	@echo "Building server and load test with debug symbols..."
+	@$(MAKE) DEBUG=1 clean
+	@$(MAKE) DEBUG=1 build-server $(BUILD_DIR)/test_load.out
+	@echo "Starting test server in background..."
+	./$(BUILD_DIR)/server.out $(PORT) 1 0 & \
+	SERVER_PID=$$!; \
+	sleep 2; \
+
+	@echo "Launching GDB on load test..."
+	-gdb ./$(BUILD_DIR)/test_load.out
+	@echo "Cleaning up server (PID $(SERVER_PID))..."
+	-pkill -f "./$(BUILD_DIR)/server.out"
+
+# Debug server application with (no testing, all logging)
 debug-server:
 	@echo "Building server with debug symbols..."
 	@$(MAKE) DEBUG=1 clean
 	@$(MAKE) DEBUG=1 build-server
 	gdb --args ./$(BUILD_DIR)/server.out $(PORT) 0 1
 
+# Debug client application
 debug-client:
 	@echo "Building client with debug symbols..."
 	@$(MAKE) DEBUG=1 clean

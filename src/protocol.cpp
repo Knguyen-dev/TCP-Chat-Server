@@ -288,7 +288,7 @@ int build_register_response(message_t& response, user_t& user) {
   response.type = REGISTER;
   response.rc = RESP_OK;
   uint8_t* moving_ptr = response.payload;
-  write_tlv(moving_ptr, TAG_USER_ID, sizeof(user.id), static_cast<void*>(&user.id), 1);
+  write_tlv(moving_ptr, TAG_USER_ID, sizeof(user.user_id), static_cast<void*>(&user.user_id), 1);
   write_tlv(moving_ptr, TAG_USERNAME, user.username.length(), user.username.data(), 0);
   response.payload_length = (uint32_t)(moving_ptr - response.payload);
   if (response.payload_length > MSG_MAX_PAYLOAD_SIZE) {
@@ -318,8 +318,8 @@ int parse_register_response(message_t& response, user_t& user) {
 
     switch (tag) {
       case TAG_USER_ID:
-        memcpy(&user.id, payload_ptr, num_bytes);
-        user.id = ntohl(user.id);
+        memcpy(&user.user_id, payload_ptr, num_bytes);
+        user.user_id = ntohl(user.user_id);
         has_id = 1;
         break;
       case TAG_USERNAME:
@@ -437,7 +437,7 @@ int build_login_response(message_t& response, user_t& user) {
   response.type = LOGIN;
   response.rc = RESP_OK;
   uint8_t* moving_ptr = response.payload;
-  write_tlv(moving_ptr, TAG_USER_ID, sizeof(user.id), static_cast<void*>(&user.id), 1);
+  write_tlv(moving_ptr, TAG_USER_ID, sizeof(user.user_id), static_cast<void*>(&user.user_id), 1);
   write_tlv(moving_ptr, TAG_USERNAME, user.username.length(), user.username.data(), 0);
   response.payload_length = (uint32_t)(moving_ptr - response.payload);
   if (response.payload_length > MSG_MAX_PAYLOAD_SIZE) {
@@ -473,8 +473,8 @@ int parse_login_response(message_t& response, user_t& user) {
         has_username = 1;
         break;
       case TAG_USER_ID:
-        memcpy(&user.id, payload_ptr, num_bytes);
-        user.id = ntohl(user.id);
+        memcpy(&user.user_id, payload_ptr, num_bytes);
+        user.user_id = ntohl(user.user_id);
         has_id = 1;
         break;
       default:
