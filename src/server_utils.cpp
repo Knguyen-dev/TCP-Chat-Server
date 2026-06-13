@@ -286,6 +286,10 @@ static int register_user(message_t& request, message_t& response) {
   user.user_id = 0; 
   user.username = credentials.username;
   user.password = credentials.password;
+  
+  
+  // NOTE: Insertion is quite expensive, making a user registration request
+  // take about 4.5 ms due to this one insert statement
   if (insert_user(user) != 0) {
     LOG_ERROR("insert_user Failure!\n");
     response = build_server_response(REGISTER, RESP_ERROR_INTERNAL, NULL, 0);

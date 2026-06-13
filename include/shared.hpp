@@ -27,40 +27,9 @@
 
 #define MAX_USERNAME_SIZE 32
 #define MAX_PASSWORD_SIZE 32
-#define MAX_MSG_CONTENT_SIZE 250 // MAX message size a user can type/send out
-
-
-// ##### Client and Load Testing Structs #####
-// NOTE: These are kind of legacy, and are kept so that the client 
-// and the laod tester still works. The main focus is the TCP server!
-
-/**
- * Struct fully representing a user in the database.
- * @note On the server side it's used in user registration and login, rather 
- * than actually being used to represent users in some kind of connection table.
- * The client side makes use of this as well.
- */
-struct user_t {
-    uint32_t user_id;
-    std::string username;
-    std::string password;
-};
-
-// Struct representing an existing TCP client
-struct conn_t {
-  struct sockaddr_storage addr;  // An IPv4 or IPv6 address structure (128 bytes).
-  user_t* user = nullptr;                  // Pointer to the user associated with the connection; if pointer isn't NULL, this is an authenticated user
-  int fd = -1;                        // Integer containing the file descriptor for the TCP connection socket.
-  bool want_read = false;        // Booleans indicating readiness intentions
-  bool want_write = false;
-  bool want_close = false;
-  std::vector<uint8_t> incoming; // Buffer stores data read (and needs to be parsed) by our user-space app from the kernel.
-  std::vector<uint8_t> outgoing; // Buffer stores  data that needs to be written to the peer.
-};
-
+#define MAX_MSG_CONTENT_SIZE 255 // MAX message size a user can type/send out
 
 // ##### Connection flags and overloads #####
-
 /**
  * ENUM representing the various connection flags and states that can be 
  * toggled on a TCP connection.
@@ -122,6 +91,31 @@ ConnFlags operator&=(ConnFlags& lhs, ConnFlags rhs);
  * @return True if the flag is in the mask, otherwise false.
  */
 bool has_flag(ConnFlags mask, ConnFlags flag);
+
+// ##### Client and Load Testing Structs #####
+// NOTE: These are kind of legacy, and are kept so that the client 
+// and the laod tester still works. The main focus is the TCP server!
+/**
+ * Struct fully representing a user in the database.
+ * @note On the server side it's used in user registration and login, rather 
+ * than actually being used to represent users in some kind of connection table.
+ * The client side makes use of this as well.
+ */
+struct user_t {
+    uint32_t user_id;
+    std::string username;
+    std::string password;
+};
+
+// Struct representing an existing TCP client
+struct conn_t {
+  std::vector<uint8_t> incoming; // Buffer stores data read (and needs to be parsed) by our user-space app from the kernel.
+  std::vector<uint8_t> outgoing; // Buffer stores  data that needs to be written to the peer.
+  user_t user{};        // Pointer to the user associated with the connection; if pointer isn't NULL, this is an authenticated user
+  int fd = -1;                   // Integer containing the file descriptor for the TCP connection socket.
+  ConnFlags flags{ConnFlags::NONE};
+};
+
 
 /**
  * Prompts input for a value within a given range.

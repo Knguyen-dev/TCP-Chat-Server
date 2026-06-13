@@ -83,6 +83,10 @@ integration-tests: build-server $(BUILD_DIR)/test_auth.out $(BUILD_DIR)/test_bro
 	-pkill -SIGINT -f "./$(BUILD_DIR)/server.out"
 
 load-test: build-server $(BUILD_DIR)/test_load.out
+
+	@echo "Killing any pre-existing server on 8080"
+	-pkill -f "./$(BUILD_DIR)/server.out"
+
 	@echo "Starting test server (in background)..."
 	./$(BUILD_DIR)/server.out $(PORT) 1 0 &
 	sleep 2
