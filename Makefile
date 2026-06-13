@@ -14,6 +14,13 @@ SRC_DIR   = src
 INC_DIR   = include
 PORT     ?= 8080
 
+VALGRIND_FLAGS = --tool=memcheck --leak-check=full --show-leak-kinds=all --track-origins=yes
+ASAN_FLAGS = -fsanitize=address -fno-omit-frame-pointer -g
+
+# Flag to indicate if we're running tests (used to conditionally compile test code)
+IS_TEST ?= 0
+ENABLE_LOGGING ?= 1
+
 # Header files (for dependency tracking)
 HEADERS   = $(wildcard $(INC_DIR)/*.hpp)
 
@@ -36,12 +43,97 @@ build-server: $(BUILD_DIR)/server.out
 build-client: $(BUILD_DIR)/client.out
 
 # Builds and runs server
+# make run-server PORT=8080 IS_TEST=1 for test mode
 run-server: build-server
-	./$(BUILD_DIR)/server.out $(PORT)
+	./$(BUILD_DIR)/server.out $(PORT) $(IS_TEST) $(ENABLE_LOGGING)
 
 # Builds and runs client 
 run-client: build-client
 	./$(BUILD_DIR)/client.out
+
+kill:
+	-pkill -f "./$(BUILD_DIR)/server.out"
+
+
+
+
+
+
+
+# Builds and runs the test suite
+# 1. Run test server in the background; wait until it's fully up before running tests.
+# 2. Run auth integration tests, alongside any other tests
+# The '-' means that even if the test binary returns a non-zero exit code, the Makefile won't stop executing.
+# This allows us to run all tests and then clean up the server, even if some tests fail.
+# 3. Cleanup testing server
+# NOTE: We use sigint instead of sigkill, because if you do the latter, valgrind won't be able to 
+# send its final memory report. Also we have valgrind running on the tests as well just to check.
+integration-tests: build-server $(BUILD_DIR)/test_auth.out $(BUILD_DIR)/test_broadcast.out
+	@echo "Starting test server (in background)..."
+	valgrind $(VALGRIND_FLAGS) --log-file=valgrind_server_test.log ./$(BUILD_DIR)/server.out $(PORT) 1 0 &
+	sleep 3 # Increased sleep to 3s to give Valgrind time to initialize the binary
+
+	@echo "Running auth integration tests..."
+	-./$(BUILD_DIR)/test_auth.out
+
+	@echo "Running broadcast integration tests..."
+	-./$(BUILD_DIR)/test_broadcast.out
+
+	@echo "Cleaning up server..."
+	-pkill -SIGINT -f "./$(BUILD_DIR)/server.out"
+
+load-test: build-server $(BUILD_DIR)/test_load.out
+
+	@echo "Killing any pre-existing server on 8080"
+	-pkill -f "./$(BUILD_DIR)/server.out"
+
+	@echo "Starting test server (in background)..."
+	./$(BUILD_DIR)/server.out $(PORT) 1 0 &
+	sleep 2
+
+	@echo "Running load testing script..."
+	- ./$(BUILD_DIR)/test_load.out
+
+	@echo "Cleaning up server..."
+	-pkill -f "./$(BUILD_DIR)/server.out"
+
+
+
+build-benchmark: ./test/benchmark/benchmark_test.cpp 
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) -O3 -g -std=c++17 $< -o ./$(BUILD_DIR)/benchmark_test.out -lbenchmark -lpthread -fno-omit-frame-pointer
+
+run-benchmark: build-benchmark
+	sudo perf stat ./$(BUILD_DIR)/benchmark_test.out	
+
+# Or: sudo perf stat ./build/benchmark_test.out
+# sudo perf stat -e cache-references,cache-misses,branches,branch-misses,instructions,cycles ./build/benchmark_test.out --benchmark_filter=Embedded
+
+run-perf: build-benchmark
+	sudo perf record -g ./$(BUILD_DIR)/benchmark_test.out
+	sudo perf report -g 'graph,0.5,caller'
+
+
+##### Compile Integration, Load, and Unit Tests #####
+$(BUILD_DIR)/test_auth.out: test/integration/test_auth.cpp test/integration/test_utils.cpp src/protocol.cpp src/logger.cpp
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(BUILD_DIR)/test_broadcast.out: test/integration/test_broadcast.cpp test/integration/test_utils.cpp src/protocol.cpp src/logger.cpp
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(BUILD_DIR)/test_load.out: test/load/test_load.cpp src/shared.cpp src/protocol.cpp src/logger.cpp test/integration/test_utils.cpp
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+unit-tests: $(BUILD_DIR)/test_shared.out
+	@echo "Running shared.cpp unit tests"
+	- ./$(BUILD_DIR)/test_shared.out
+
+$(BUILD_DIR)/test_shared.out: test/unit/test_shared.cpp src/shared.cpp
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
 # Link object files to create server executable.
 $(BUILD_DIR)/server.out: $(SERVER_OBJS)
@@ -60,13 +152,30 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp $(HEADERS)
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@ $(LDFLAGS)
 
-# Debug targets - properly rebuild with debug flags
+##### Run Debugging Scripts #####
+# Debug the load test script (automatically handles the background server)
+debug-load-test:
+	@echo "Building server and load test with debug symbols..."
+	@$(MAKE) DEBUG=1 clean
+	@$(MAKE) DEBUG=1 build-server $(BUILD_DIR)/test_load.out
+	@echo "Starting test server in background..."
+	./$(BUILD_DIR)/server.out $(PORT) 1 0 & \
+	SERVER_PID=$$!; \
+	sleep 2; \
+
+	@echo "Launching GDB on load test..."
+	-gdb ./$(BUILD_DIR)/test_load.out
+	@echo "Cleaning up server (PID $(SERVER_PID))..."
+	-pkill -f "./$(BUILD_DIR)/server.out"
+
+# Debug server application with (no testing, all logging)
 debug-server:
 	@echo "Building server with debug symbols..."
 	@$(MAKE) DEBUG=1 clean
 	@$(MAKE) DEBUG=1 build-server
-	gdb --args ./$(BUILD_DIR)/server.out $(PORT)
+	gdb --args ./$(BUILD_DIR)/server.out $(PORT) 0 1
 
+# Debug client application
 debug-client:
 	@echo "Building client with debug symbols..."
 	@$(MAKE) DEBUG=1 clean

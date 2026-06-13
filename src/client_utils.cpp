@@ -134,7 +134,7 @@ static int handle_client_login(conn_t& conn, std::string& username, std::string&
  */
 static void handle_world_message(conn_t& conn, std::string& message_content) {
   world_broadcast_t broadcast;
-  broadcast.sender_username = conn.user->username;
+  broadcast.sender_username = conn.user.username;
   broadcast.message_content = message_content;
   uint8_t request_buffer[MSG_HEADER_SIZE + MSG_MAX_PAYLOAD_SIZE];
   uint32_t message_len{};
@@ -158,7 +158,7 @@ static void handle_world_message(conn_t& conn, std::string& message_content) {
  */
 static void handle_peer_message(conn_t& conn, std::string& recipient_username, std::string& message_content) {
   p2p_broadcast_t broadcast;
-  broadcast.sender_username = conn.user->username;  
+  broadcast.sender_username = conn.user.username;  
   broadcast.recipient_username = recipient_username;
   broadcast.message_content = message_content;
   uint8_t request_buffer[MSG_HEADER_SIZE+MSG_MAX_PAYLOAD_SIZE];
@@ -202,7 +202,7 @@ static void handle_registration_response(message_t& response) {
   }
   LOG_INFO(
     "[Registration]: Successful, <User id=%d, username=%s>\n", 
-    user.id, user.username.data()
+    user.user_id, user.username.data()
   );
 }
 
@@ -226,21 +226,12 @@ static void handle_login_response(conn_t& conn, message_t& response) {
     LOG_ERROR("parse_login_response() failed!\n");
     return;
   }
-  LOG_INFO("[Login]: Successful, <User id=%d, username=%s>\n", user.id, user.username.data());
-
-  /*
-  TODO: Segmentation fault happens here
-  Again seg faults happen when we're accessing memory incorrectly.
-  Below we're accessing two levels of pointers, and the seg fault has happened
-  likely becuase we dereferenced a null pointer.
+  LOG_INFO("[Login]: Successful, <User id=%d, username=%s>\n", user.user_id, user.username.data());
   
-  */
-
-  user_t* new_user = new user_t();
-  new_user->id = user.id;
-  new_user->username = user.username;
   std::lock_guard<std::mutex> lock(g_conn_mutex);
-  g_client_conn->user = new_user;
+  g_client_conn->user.user_id = user.user_id;
+  g_client_conn->user.username = user.username;
+  g_client_conn->flags |= ConnFlags::IS_AUTH;
 }
 
 /**
@@ -363,7 +354,7 @@ static bool command_shell(conn_t& conn, std::string& input_line) {
   command = string_to_lower(command);
 
   if (command == "/p2p") {
-    if (conn.user == nullptr) {
+    if (!has_flag(conn.flags, ConnFlags::IS_AUTH)) {
       LOG_INFO("[System] You must log in before messaging!\n");
       return true;
     }
@@ -377,11 +368,10 @@ static bool command_shell(conn_t& conn, std::string& input_line) {
     }
     handle_peer_message(conn, recipient, message);    
   } else if (command == "/world") {
-    if (conn.user == nullptr) {
+    if (!has_flag(conn.flags, ConnFlags::IS_AUTH)) {
       LOG_INFO("[System] You must log in before messaging!\n");
       return true;
     }
-
     std::string message;
     std::getline(ss >> std::ws, message);
     if (message.empty()) {
@@ -391,8 +381,8 @@ static bool command_shell(conn_t& conn, std::string& input_line) {
 
     handle_world_message(conn, message);
   } else if (command == "/login") {
-    if (conn.user != nullptr) {
-      LOG_INFO("[System] Can't login since already logged in as '%s'!\n", conn.user->username.data());
+    if (has_flag(conn.flags, ConnFlags::IS_AUTH)) {
+      LOG_INFO("[System] Can't login since already logged in as '%s'!\n", conn.user.username.data());
       return true;
     }
 
@@ -407,10 +397,11 @@ static bool command_shell(conn_t& conn, std::string& input_line) {
 
     handle_client_login(conn, username, password);
   } else if (command == "/register") {
-    if (conn.user != nullptr) {
-      LOG_INFO("[System] Can't register since already logged in as '%s'!\n", conn.user->username.data());
+    if (has_flag(conn.flags, ConnFlags::IS_AUTH)) {
+      LOG_INFO("[System] Can't register since already logged in as '%s'!\n", conn.user.username.data());
       return true;
     }
+
     std::string username;
     std::string password;
     ss >> username;
@@ -476,10 +467,7 @@ void run_messaging_loop(conn_t& conn) {
   if (g_client_conn->fd != -1) {
     close(g_client_conn->fd);  
   }
-  if (g_client_conn->user != nullptr) {
-    delete g_client_conn->user;
-  }
-
+  
   LOG_INFO("See you again someday, somewhere!\n");
 }
 
@@ -515,7 +503,6 @@ int create_client_connection(char* ip, short port, conn_t& conn) {
     return -1;
   }
 
-  memcpy(&conn.addr, &server_addr, sizeof(server_addr));
   conn.fd = fd;
   return fd;
 }
