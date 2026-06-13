@@ -54,12 +54,6 @@ run-client: build-client
 kill:
 	-pkill -f "./$(BUILD_DIR)/server.out"
 
-
-
-
-
-
-
 # Builds and runs the test suite
 # 1. Run test server in the background; wait until it's fully up before running tests.
 # 2. Run auth integration tests, alongside any other tests
@@ -189,7 +183,7 @@ clean:
 
 # Format code
 format:
-	clang-format -i $(SRC_DIR)/*.c $(INC_DIR)/*.h
+	clang-format -i $(SRC_DIR)/*.cpp $(INC_DIR)/*.hpp
 	@echo "Code formatted"
 
 # Help target
