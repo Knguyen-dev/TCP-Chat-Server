@@ -54,12 +54,6 @@ run-client: build-client
 kill:
 	-pkill -f "./$(BUILD_DIR)/server.out"
 
-
-
-
-
-
-
 # Builds and runs the test suite
 # 1. Run test server in the background; wait until it's fully up before running tests.
 # 2. Run auth integration tests, alongside any other tests
@@ -189,23 +183,5 @@ clean:
 
 # Format code
 format:
-	clang-format -i $(SRC_DIR)/*.c $(INC_DIR)/*.h
+	clang-format -i $(SRC_DIR)/*.cpp $(INC_DIR)/*.hpp
 	@echo "Code formatted"
-
-# Help target
-help:
-	@echo "Available targets:"
-	@echo "  make                  - Build server and client"
-	@echo "  make build-server     - Build server only"
-	@echo "  make build-client     - Build client only"
-	@echo "  make run-server       - Build and run server (PORT=8080)"
-	@echo "  make run-client       - Build and run client"
-	@echo "  make test             - Run automated tests (starts/stops server)"
-	@echo "  make debug-server     - Build with debug symbols and launch gdb"
-	@echo "  make debug-client     - Build with debug symbols and launch gdb"
-	@echo "  make clean            - Remove build directory"
-	@echo "  make format           - Format all source files"
-	@echo ""
-	@echo "Options:"
-	@echo "  PORT=<port>          - Set server port (default: 8080)"
-	@echo "  DEBUG=1              - Build with debug symbols and no optimization"

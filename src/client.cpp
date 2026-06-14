@@ -1,6 +1,6 @@
-#include "shared.hpp"
 #include "client_utils.hpp"
 #include "logger.hpp"
+#include "shared.hpp"
 
 int main(void) {
   char input_ip[16]{"0.0.0.0"};
@@ -17,6 +17,6 @@ int main(void) {
   }
   LOG_INFO("[System] Connected to %s:%d\n", input_ip, port);
 
-  run_messaging_loop(conn);  
+  run_messaging_loop(conn);
   return 0;
 }

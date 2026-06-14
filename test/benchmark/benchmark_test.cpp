@@ -643,35 +643,35 @@ static void BM_SOA_P2P_Broadcast_MIXED(benchmark::State& state) {
 // Test Registration
 // --------------------------------------------------
 
-// BENCHMARK(BM_Traversal_Indirect)
-//     ->Arg(1000)
-//     ->Arg(10000)
-//     ->Arg(100000);
+BENCHMARK(BM_Traversal_Indirect)
+    ->Arg(1000)
+    ->Arg(10000)
+    ->Arg(100000);
 
-// BENCHMARK(BM_Traversal_Direct)
-//     ->Arg(1000)
-//     ->Arg(10000)
-//     ->Arg(100000);
+BENCHMARK(BM_Traversal_Direct)
+    ->Arg(1000)
+    ->Arg(10000)
+    ->Arg(100000);
 
-// BENCHMARK(BM_UserAccess_Indirect)
-//     ->Arg(1000)
-//     ->Arg(10000)
-//     ->Arg(100000);
+BENCHMARK(BM_UserAccess_Indirect)
+    ->Arg(1000)
+    ->Arg(10000)
+    ->Arg(100000);
 
-// BENCHMARK(BM_UserAccess_Direct)
-//     ->Arg(1000)
-//     ->Arg(10000)
-//     ->Arg(100000);
+BENCHMARK(BM_UserAccess_Direct)
+    ->Arg(1000)
+    ->Arg(10000)
+    ->Arg(100000);
 
-// BENCHMARK(BM_ManySmallAllocations)
-//     ->Arg(1000)
-//     ->Arg(10000)
-//     ->Arg(100000);
+BENCHMARK(BM_ManySmallAllocations)
+    ->Arg(1000)
+    ->Arg(10000)
+    ->Arg(100000);
 
-// BENCHMARK(BM_OneContiguousAllocation)
-//     ->Arg(1000)
-//     ->Arg(10000)
-//     ->Arg(100000);
+BENCHMARK(BM_OneContiguousAllocation)
+    ->Arg(1000)
+    ->Arg(10000)
+    ->Arg(100000);
 
 BENCHMARK(BM_AOS_World_Broadcast_AUTH)
     ->Arg(1000)
