@@ -1,21 +1,26 @@
 
-#include <arpa/inet.h> // inet_pton()
-#include <atomic>   // std::atomic
-#include <mutex>    // std::mutex
-#include <poll.h>   // poll()
-#include <signal.h> // signal handling
-#include <thread>   // multithreading
-#include <unistd.h> // close(), read(), write()
-#include <vector>   // std::vector
-#include <cstring>  // memset
-#include <sstream>  // std::stringstream
-#include <iostream> // std::cout, cin, endl, getline
-
-
 #include "client_utils.hpp"
-#include "protocol.hpp"
-#include "logger.hpp"
-
+#include <arpa/inet.h>   // for inet_pton, htons
+#include <errno.h>       // for errno
+#include <netinet/in.h>  // for sockaddr_in
+#include <poll.h>        // for pollfd, POLLIN, POLLERR, poll
+#include <signal.h>      // for sigaction, sigemptyset, SIGINT, sa_handler
+#include <stdint.h>      // for uint8_t, uint32_t
+#include <stdio.h>       // for printf
+#include <sys/socket.h>  // for AF_INET, connect, socket, SOCK_STREAM
+#include <unistd.h>      // for close, write, pipe, ssize_t, STDERR_FILENO
+#include <atomic>        // for atomic
+#include <cstring>       // for strerror, memset
+#include <functional>    // for ref
+#include <iostream>      // for char_traits, basic_istream, basic_ios, ws, cin
+#include <mutex>         // for mutex, lock_guard
+#include <sstream>       // for basic_stringstream
+#include <string>        // for string, operator==, operator>>, allocator
+#include <string_view>   // for string_view
+#include <thread>        // for thread
+#include "logger.hpp"    // for LOG_ERROR, LOG_INFO, LOG_WARN, LOG_DEBUG
+#include "protocol.hpp"  // for write_one_message, get_response_message, MSG...
+#include "shared.hpp"    // for conn_t, user_t, has_flag, ConnFlags, operator|=
 
 // -----------------------------
 // Signal Handling and Graceful Shutdown

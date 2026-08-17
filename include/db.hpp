@@ -1,13 +1,8 @@
-#ifndef DB_H
-#define DB_H
+#ifndef DB_HPP
+#define DB_HPP
 
-#include "shared.hpp"
-#include <string>
-
-// C-library
-extern "C" {
-#include <sqlite3.h>
-}
+#include <string>  // for string
+struct user_t; // forward declaration, definition is in shared.hpp
 
 // NOTE: Forward declarations for our constant globals
 extern const char *const DB_PATH;

@@ -1,9 +1,13 @@
 #include "shared.hpp"
-#include <cstdint>   // uint8_t
-#include <iostream>  // std::cout, std::cin, std::endl
-#include <cstring>   // strchr
-#include <limits>    // numeric_limits, streamsize
-#include <algorithm> // transform
+#include <errno.h>    // for errno
+#include <stdio.h>    // for fprintf, printf, getchar, stderr, fgets, scanf
+#include <algorithm>  // for transform
+#include <cctype>     // for tolower
+#include <cstdint>    // for uint8_t
+#include <cstdlib>    // for exit, abort
+#include <cstring>    // for strchr
+#include <iostream>   // for basic_istream, cin, basic_ostream, cout, basic_ios
+#include <limits>     // for numeric_limits
 
 
 static uint8_t to_utype(ConnFlags f) { return static_cast<uint8_t>(f); }
