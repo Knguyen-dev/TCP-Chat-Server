@@ -1,9 +1,40 @@
+#include <cstdint>
+#include <vector>
+#include <string>
+#include <sys/epoll.h> // epoll() 
+#include <fstream>
+#include <malloc.h>    // mallinfo2()
+#include <unistd.h>    // close(), read(), write()
+#include <fcntl.h>     // fcntl() for setting non-blocking sockets
+#include <netdb.h>     // freeaddrinfo
+#include <cstring>     // memset
+
 #include "server_utils.hpp"
 #include "db.hpp"
 #include "logger.hpp"
 #include "protocol.hpp"
 #include "shared.hpp"
-#include <chrono>
+
+/**
+ * Checks whether an error code means the socket would block
+ * @param err Error code being tested
+ * @note POSIX standard allows platforms (like older variants of unix) 
+ * to define EAGAIN and EWOULDBLOCK as different. Checking 
+ * for both is the standard portable way of handling non-blockign sockets.
+ * To silence GCC warnings, we'll compare their values at compile time.
+ * If their values are different, we'll check for both values.
+ * If their values are the same, we can default to the modern EAGAIN.
+ * 
+ */
+inline bool is_would_block(int err) {
+#if defined(EWOULDBLOCK) && (EWOULDBLOCK != EAGAIN)
+    return err == EAGAIN || err == EWOULDBLOCK;
+#else
+    return err == EAGAIN;
+#endif
+}
+
+
 
 // ----------------
 // Connection Table
@@ -15,7 +46,7 @@
  * @note This should be called when the server starts as we want to take
  * advantage of arena allocation.
  */
-static ConnectionManager create_connection_manager(int64_t N) {
+static ConnectionManager create_connection_manager(size_t N) {
   ConnectionManager manager;
 
   // Allocates memory for N connections
@@ -27,7 +58,7 @@ static ConnectionManager create_connection_manager(int64_t N) {
 
   // Creates those N connection instances within those empty slots.
   // Sets reasonable default values
-  for (int64_t i = 0; i < N; i++) {
+  for (size_t i = 0; i < N; i++) {
     manager.flags.push_back(ConnFlags::NONE);
     manager.incoming_buffers.emplace_back();
     manager.outgoing_buffers.emplace_back();
@@ -78,18 +109,27 @@ static void log_server_metrics() {
 
   // 3. Get heap usage data.
   struct mallinfo2 mi = mallinfo2();
+  
+
   char buf[512];
-  int offset = 0;
-  offset += snprintf(buf + offset, sizeof(buf) - offset,
-                     "Num connections = %d, num auth = %d\n", num_connected,
-                     num_auth);
-  offset +=
-      snprintf(buf + offset, sizeof(buf) - offset,
-               "Physical RAM Usage (bytes) = %zu\n", mem.physical_ram_bytes);
-  offset += snprintf(
+  size_t offset = 0;
+
+  offset += static_cast<size_t>(snprintf(
       buf + offset, sizeof(buf) - offset,
-      "Heap Used = %ld bytes, heap free = %ld bytes, total heap = %ld\n",
-      mi.uordblks, mi.fordblks, mi.arena);
+      "Num connections = %d, num auth = %zu\n",
+      num_connected, static_cast<size_t>(num_auth)));
+
+  offset += static_cast<size_t>(snprintf(
+      buf + offset, sizeof(buf) - offset,
+      "Physical RAM Usage (bytes) = %zu\n",
+      static_cast<size_t>(mem.physical_ram_bytes)));
+
+  offset += static_cast<size_t>(snprintf(
+      buf + offset, sizeof(buf) - offset,
+      "Heap Used = %zu bytes, heap free = %zu bytes, total heap = %zu\n",
+      static_cast<size_t>(mi.uordblks),
+      static_cast<size_t>(mi.fordblks),
+      static_cast<size_t>(mi.arena)));
 
   LOG_INFO("%s\n", buf);
 }
@@ -105,7 +145,7 @@ int handle_server_input() {
         LOG_INFO("Stdin closed!\n");
         break;
       }
-      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      if (is_would_block(errno)) {
         // We have read all currently available data from the buffer
         break;
       } else if (errno == EINTR) {
@@ -174,7 +214,7 @@ void set_nonblocking_fd(int fd) {
  */
 static void set_connection_state(int epollfd, int connfd,
                                  ConnState next_state) {
-  ConnFlags &current_flags = conn_manager.flags[connfd];
+  ConnFlags &current_flags = conn_manager.flags[static_cast<size_t>(connfd)];
   struct epoll_event ev {};
   ev.data.fd = connfd;
   switch (next_state) {
@@ -228,23 +268,27 @@ static void add_connection(int epollfd, int connfd) {
   }
 
   // 2. Reallocate dynamic vector if needed
+  // NOTE: Again, connfd+1 is guaranteed to be positive, so there's no issues converting 
+  // from signed to unsigned, as it stays positive.
   if (conn_manager.get_size() <= (size_t)connfd) {
-    conn_manager.flags.resize(connfd + 1);
-    conn_manager.incoming_buffers.resize(connfd + 1);
-    conn_manager.outgoing_buffers.resize(connfd + 1);
-    conn_manager.user_ids.resize(connfd + 1);
-    conn_manager.usernames.resize(connfd + 1);
+
+    size_t new_size = static_cast<size_t>(connfd+1);
+    conn_manager.flags.resize(new_size);
+    conn_manager.incoming_buffers.resize(new_size);
+    conn_manager.outgoing_buffers.resize(new_size);
+    conn_manager.user_ids.resize(new_size);
+    conn_manager.usernames.resize(new_size);
   }
 
   // 3. Record flags; connection slot is active and wants to read.
-  conn_manager.flags[connfd] = ConnFlags::IS_ACTIVE | ConnFlags::WANT_READ;
+  conn_manager.flags[static_cast<size_t>(connfd)] = ConnFlags::IS_ACTIVE | ConnFlags::WANT_READ;
 }
 
 void remove_connection(int connfd, int epollfd) {
   // NOTE: Mark connection as inactive (and therefore unauthenticated)
   // Setting it to none, is probably the easiest thing as
   // we don't need connection specific information anymore.
-  ConnFlags &current_flags = conn_manager.flags[connfd];
+  ConnFlags &current_flags = conn_manager.flags[static_cast<size_t>(connfd)];
   current_flags = ConnFlags::NONE;
 
   // Remove TCP connection fd from epoll interest list
@@ -356,9 +400,9 @@ static int login_user(int connfd, message_t &request, message_t &response) {
   }
 
   // Update connection table with user info and authenticate the connection.
-  conn_manager.user_ids[connfd] = user.user_id;
-  conn_manager.usernames[connfd] = user.username;
-  conn_manager.flags[connfd] |= ConnFlags::IS_AUTH;
+  conn_manager.user_ids[static_cast<size_t>(connfd)] = user.user_id;
+  conn_manager.usernames[static_cast<size_t>(connfd)] = user.username;
+  conn_manager.flags[static_cast<size_t>(connfd)] |= ConnFlags::IS_AUTH;
 
   if (build_login_response(response, user) != 0) {
     LOG_ERROR("build_login_response() failed!\n");
@@ -383,7 +427,7 @@ static int handle_broadcast_message(int connfd, int epollfd, message_t &request,
 
   // If connection isn't authenticated, reject the request
   // NOTE: Only authenticated users are allowed to send broadcasts.
-  if (!has_flag(conn_manager.flags[connfd], ConnFlags::IS_AUTH)) {
+  if (!has_flag(conn_manager.flags[static_cast<size_t>(connfd)], ConnFlags::IS_AUTH)) {
     LOG_DEBUG("Unauthenticated user attempted to send a broadcast message!\n");
     response =
         build_server_response(CHAT, RESP_ERROR_INVALID_CREDENTIALS, NULL, 0);
@@ -417,7 +461,7 @@ static int handle_broadcast_message(int connfd, int epollfd, message_t &request,
     // than relying on user input. That's why I did this. You should modify the
     // protocol.cpp and corresponding client code so that we don't send over
     // sender_username in a message.
-    broadcast.sender_username = conn_manager.usernames[connfd];
+    broadcast.sender_username = conn_manager.usernames[static_cast<size_t>(connfd)];
 
     // Use broadcast to create a broadcast response
     // NOTE: Broadcast response sent to all other clients will also be the
@@ -449,9 +493,14 @@ static int handle_broadcast_message(int connfd, int epollfd, message_t &request,
       // b. Copy serialized message into recipient's outgoing buffer
       // c. Set the recipient to writing state so the event loop writes the data
       // we stored in their outgoing buffer.
-      buf_append(conn_manager.outgoing_buffers[i], serialized_response.data(),
-                 serialized_response.size());
-      set_connection_state(epollfd, i, ConnState::WRITING);
+        conn_manager.outgoing_buffers[i].insert(
+          conn_manager.outgoing_buffers[i].end(), serialized_response.begin(),
+          serialized_response.end());
+
+
+      // NOTE: i is always positive, but it's never big enough where the leading 1 causes 
+      // i to be interpreted as negative with two's complement. Therefore it's a safe cast.
+      set_connection_state(epollfd, static_cast<int>(i), ConnState::WRITING);
     }
     break;
   }
@@ -471,7 +520,7 @@ static int handle_broadcast_message(int connfd, int epollfd, message_t &request,
       return RESP_ERROR_MALFORMED;
     }
 
-    broadcast.sender_username = conn_manager.usernames[connfd];
+    broadcast.sender_username = conn_manager.usernames[static_cast<size_t>(connfd)];
     if (broadcast.sender_username == broadcast.recipient_username) {
       LOG_DEBUG("Received p2p broadcast with recipient username the same as "
                 "the sender username!\n");
@@ -504,8 +553,10 @@ static int handle_broadcast_message(int connfd, int epollfd, message_t &request,
       }
       // b. If connection's username matches the recipient username, record and
       // break out of loop
+      // NOTE: i is always positive, but not big enough to be represented as negative 
+      // when interpreting as signed. Therefore this is a safe cast to signed integer.
       if (conn_manager.usernames[i] == recipient_username) {
-        recipient_conn_fd = i;
+        recipient_conn_fd = static_cast<int>(i);
         break;
       }
     }
@@ -519,10 +570,13 @@ static int handle_broadcast_message(int connfd, int epollfd, message_t &request,
     // b. Set recipient to writing state so the event loop knows to send to the
     // recipient.
     // TODO: Seems like an unnecessary copy.
+    // NOTE: Aagin, recipient_conn_fd is a file descriptor, it's always positive, therefore 
+    // interpreting to unsigned isn't an issue.
     std::vector<uint8_t> serialized_response;
     write_message_to_buffer(serialized_response, response);
-    buf_append(conn_manager.outgoing_buffers[recipient_conn_fd],
-               serialized_response.data(), serialized_response.size());
+    conn_manager.outgoing_buffers[static_cast<size_t>(recipient_conn_fd)].insert(
+      conn_manager.outgoing_buffers[static_cast<size_t>(recipient_conn_fd)].end(),
+      serialized_response.begin(), serialized_response.end());
     set_connection_state(epollfd, recipient_conn_fd, ConnState::WRITING);
     break;
   }
@@ -549,7 +603,7 @@ static int handle_broadcast_message(int connfd, int epollfd, message_t &request,
 static bool try_one_request(int connfd, int epollfd) {
 
   // Don't proceed if we don't have message header + 1 byte of payload yet.
-  std::vector<uint8_t> &incoming_buffer = conn_manager.incoming_buffers[connfd];
+  std::vector<uint8_t> &incoming_buffer = conn_manager.incoming_buffers[static_cast<size_t>(connfd)];
   if (incoming_buffer.size() < MSG_HEADER_SIZE + 1) {
     return false;
   }
@@ -594,7 +648,7 @@ static bool try_one_request(int connfd, int epollfd) {
   // a. Successfully processed message, erase message data from incoming buffer.
   // b. Write server response to client's outgoing buffer.
   buf_consume(incoming_buffer, MSG_HEADER_SIZE + request.payload_length);
-  write_message_to_buffer(conn_manager.outgoing_buffers[connfd], response);
+  write_message_to_buffer(conn_manager.outgoing_buffers[static_cast<size_t>(connfd)], response);
   return true;
 }
 
@@ -605,7 +659,7 @@ void handle_read_connection(int connfd, int epollfd) {
     if (rv < 0) {
       // Buffer is fully drained; we can safely stop and wait for next ET
       // notification
-      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      if (is_would_block(errno)) {
         break;
       }
 
@@ -614,10 +668,10 @@ void handle_read_connection(int connfd, int epollfd) {
       set_connection_state(epollfd, connfd, ConnState::CLOSING);
       return;
     } else if (rv == 0) {
-      if (conn_manager.incoming_buffers[connfd].size() == 0) {
-        if (has_flag(conn_manager.flags[connfd], ConnFlags::IS_AUTH)) {
+      if (conn_manager.incoming_buffers[static_cast<size_t>(connfd)].size() == 0) {
+        if (has_flag(conn_manager.flags[static_cast<size_t>(connfd)], ConnFlags::IS_AUTH)) {
           LOG_DEBUG("Remote Peer (fd=%d, username=%s) disconnected!\n", connfd,
-                    conn_manager.usernames[connfd].data());
+                    conn_manager.usernames[static_cast<size_t>(connfd)].data());
         } else {
           LOG_DEBUG("Remote Peer (fd=%d) disconnected!\n", connfd);
         }
@@ -627,7 +681,10 @@ void handle_read_connection(int connfd, int epollfd) {
       set_connection_state(epollfd, connfd, ConnState::CLOSING);
       return;
     }
-    buf_append(conn_manager.incoming_buffers[connfd], buffer, rv);
+
+    // NOTE: rv cast is justified because ATP, rv must be a positive value. Therefore 
+    // casting from long int to unsigned long int won't change the sign of the result.
+    buf_append(conn_manager.incoming_buffers[static_cast<size_t>(connfd)], buffer, static_cast<size_t>(rv));
   }
 
   // ### ASIDE: Core State Machine Logic ###
@@ -643,7 +700,7 @@ void handle_read_connection(int connfd, int epollfd) {
   // If we have outgoing messages to send (due to successfully parsing a request
   // message), then update the state machine to indicate that we want to write
   // to the socket.
-  std::vector<uint8_t> &outgoing_buffer = conn_manager.outgoing_buffers[connfd];
+  std::vector<uint8_t> &outgoing_buffer = conn_manager.outgoing_buffers[static_cast<size_t>(connfd)];
   if (outgoing_buffer.size() > 0) {
     set_connection_state(epollfd, connfd, ConnState::WRITING);
   }
@@ -651,11 +708,11 @@ void handle_read_connection(int connfd, int epollfd) {
 
 void handle_write_connection(int connfd, int epollfd) {
 
-  std::vector<uint8_t> &outgoing_buffer = conn_manager.outgoing_buffers[connfd];
+  std::vector<uint8_t> &outgoing_buffer = conn_manager.outgoing_buffers[static_cast<size_t>(connfd)];
   while (true) {
     ssize_t rv = write(connfd, outgoing_buffer.data(), outgoing_buffer.size());
     if (rv < 0) {
-      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      if (is_would_block(errno)) {
         return;
       }
       // Otherwise an actual error happened.
@@ -687,7 +744,7 @@ void accept_all_connections(int listenfd, int epollfd) {
       // If blocking, then no connections are left in the kernel, exit
       // NOTE: Accepting one connection at a time, and there could be multiple
       // requests which is why we're in a while loop
-      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      if (is_would_block(errno)) {
         return;
       }
 

@@ -1,4 +1,7 @@
 #include "db.hpp"
+#include "shared.hpp"
+#include <cstring>
+#include <cstdint>
 
 sqlite3 *db;
 
@@ -70,7 +73,9 @@ int get_user_by_username(const std::string &username, user_t &user) {
   sqlite3_bind_text(res, 1, username.c_str(), -1, SQLITE_STATIC);
   int found = 0;
   if (sqlite3_step(res) == SQLITE_ROW) {
-    user.user_id = sqlite3_column_int(res, 0);
+
+    // user_id will always be strictly positive, so converting int to uint32_t is not dangerous.
+    user.user_id = static_cast<uint32_t>(sqlite3_column_int(res, 0));
     const char *sql_username = (const char *)sqlite3_column_text(res, 1);
     const char *sql_password = (const char *)sqlite3_column_text(res, 2);
     user.username =

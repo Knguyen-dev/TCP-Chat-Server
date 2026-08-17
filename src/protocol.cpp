@@ -1,5 +1,11 @@
 #include "protocol.hpp"
+#include "shared.hpp"
 #include "logger.hpp"
+#include <cstdint>      // uint8_t, uint32_t, and others
+#include <netinet/in.h> // htons
+#include <cstring>      // memcpy
+#include <unistd.h>     // read, write, close
+#include <sstream>      // std::stringstream
 
 // ---------------------------------
 // Utilities
@@ -70,7 +76,23 @@ void buf_append(std::vector<uint8_t> &buf, const uint8_t *data, size_t len) {
 }
 
 void buf_consume(std::vector<uint8_t> &buf, size_t n) {
-  buf.erase(buf.begin(), buf.begin() + n);
+
+  /*
+  n is unsigned but iterator arithmetic expects a signed type. Implicitly converted
+  unsigned to signed has sign conversion risks. It's saying that our unsigned long (8 bytes) n
+  could get interpreted as a negative number (two's complement). However that only 
+  happens if the leading bit of the unsigned value is 1, which would still be extremely 
+  as that means n would have to be extremely big. Okay, so you just have to tell the compiler 
+  "Hey, n will never be that big." If you want to be thorough, n is only as big as 
+  the MSG_HEADER_SIZE + request.payload_length or the number of bytes you read from the outgoing buffer.
+
+  The solution is to cast n to the vector's difference type to satisfy the compiler's strict check.
+  This tells the compiler "I guarantee n won't be large enough to overlofw into a negative value when 
+  interpreted via two's complement, so ignore the wraning."
+  */
+
+  using diff_t = std::vector<unsigned char>::difference_type;
+  buf.erase(buf.begin(), buf.begin() + static_cast<diff_t>(n));
 }
 
 void write_message_to_buffer(std::vector<uint8_t> &buffer, message_t &message) {
@@ -111,9 +133,28 @@ int read_one_message(int fd, message_t &message) {
   // ##### 1. Read message header ONLY and copy it to the conn_t::incoming #####
   uint8_t header_buffer[MSG_HEADER_SIZE];
   uint8_t *ptr = header_buffer;
-  int bytes_to_read = MSG_HEADER_SIZE;
+  size_t bytes_to_read = MSG_HEADER_SIZE;
   while (bytes_to_read > 0) {
-    int bytes_read = read(fd, ptr, bytes_to_read);
+    /*
+    bytes_to_read is a signed integer whilst the read() syscall
+    expects an unsigned long. The compiler's concerned that bytes_to_read 
+    could potentially represent negative values in our code, and  interpreting 
+    a negative signed integer as an unsigned integer would make the integer positive, 
+    which may not be our intent. The solution is to declare bytes_to_read is a size_t.
+
+    The next issue is that read() returns a ssize_t (a long int) and truncating it to a 
+    regular 4 byte int would literally truncate the value. I mean fair, for modern C++ 
+    practices I'll change the bytes_read to type ssize_t from int.
+
+    The last issue is that the decrement operator tries to implicitly convert our signed long int 
+    into an unsigned long int, when doing the decrement operation. The compiler is concerned that 
+    bytes_read could represent a negative value (e.g., leading 1 bit), and interpreting it as unsigned
+    would lead to a warp around to a large positive number. Reason that the only way bytes_read is negative
+    is if the syscall returns -1, which we explicitly check for. Therefore, ATP in the code, bytes_read is
+    guaranteed to be positive for pointer arithmetic. Do a simple static_cast.
+    */
+
+    ssize_t bytes_read = read(fd, ptr, bytes_to_read);
     if (bytes_read == 0) {
       LOG_ERROR("EOF when reading msg header. Remote peer closed!\n");
       return -1;
@@ -129,7 +170,7 @@ int read_one_message(int fd, message_t &message) {
       return -1;
     }
     ptr += bytes_read;
-    bytes_to_read -= bytes_read;
+    bytes_to_read -= static_cast<size_t>(bytes_read);
   }
 
   // ##### 2. Insert data into conn_t::incoming and parse Header Fields into
@@ -155,7 +196,7 @@ int read_one_message(int fd, message_t &message) {
   bytes_to_read = message.payload_length;
   ptr = message.payload;
   while (bytes_to_read > 0) {
-    int bytes_read = read(fd, ptr, bytes_to_read);
+    ssize_t bytes_read = read(fd, ptr, bytes_to_read);
     if (bytes_read == 0) {
       LOG_ERROR("Unexpected EOF when reading msg payload!\n");
       return -1;
@@ -165,7 +206,9 @@ int read_one_message(int fd, message_t &message) {
       return -1;
     }
     ptr += bytes_read;
-    bytes_to_read -= bytes_read;
+
+    // Guaranteed to be positive, no sign conversion issues here.
+    bytes_to_read -= static_cast<size_t>(bytes_read);
   }
 
   return 0;
@@ -175,7 +218,7 @@ int write_one_message(int fd, uint8_t *message_buffer, uint32_t message_len) {
   size_t bytes_sent = 0;
   size_t bytes_to_send{message_len};
   while (bytes_sent < bytes_to_send) {
-    int res = write(fd, message_buffer, bytes_to_send - bytes_sent);
+    ssize_t res = write(fd, message_buffer, bytes_to_send - bytes_sent);
     if (res <= 0) {
       // If signal interruption, then continue looping
       if (res < 0 && errno == EINTR) {
@@ -187,7 +230,9 @@ int write_one_message(int fd, uint8_t *message_buffer, uint32_t message_len) {
       return -1;
     }
     message_buffer += res;
-    bytes_sent += res;
+
+    // No sign conversion issues as res is guaranteed to be positive here
+    bytes_sent += static_cast<size_t>(res);
   }
 
   return (int)bytes_to_send;
@@ -235,14 +280,38 @@ int build_register_request(uint8_t *request_buffer,
   *header_ptr++ = REGISTER;
   *header_ptr++ = 0;
 
+  /*
+  The compiler is concerned because we're converting a long (8 bytes) unsigned int to uint8_t.
+  This is a narrowing conversion as we're truncating the top 7 bytes. Let's justify this.
+  When making the protocol, the length of a given value in a TLV MUST represented by 1 byte.
+  So there. We also have checks that ensure username and password have lengths in range [0, 255].
+  So while it looks dumb, the solution is to static cast which tells the compiler that the upper 
+  7 bytes are already zeroed out, and so no narrowing happens. 
+  */
+
   // Write payload into buffer
-  write_tlv(payload_ptr, TAG_USERNAME, credentials.username.length(),
+  write_tlv(payload_ptr, TAG_USERNAME, static_cast<uint8_t>(credentials.username.length()),
             credentials.username.data(), 0);
-  write_tlv(payload_ptr, TAG_PASSWORD, credentials.password.length(),
+  write_tlv(payload_ptr, TAG_PASSWORD, static_cast<uint8_t>(credentials.password.length()),
             credentials.password.data(), 0);
 
-  // Calculate payload length and writ it
-  message_len = payload_ptr - request_buffer;
+  /*
+  Calculate payload length and write it
+  
+  Converting from a long int into an unsigned int. The issue is that the long int could 
+  represent a negative value and then interpreting it as a unsigned value would make it positive,
+  flipping the signs. The pointer arithmetic results in a long int, in specific a std::ptrdiff_t (a long int).
+  It's also a narrowing conversion. So let's justify this.
+
+  We can guarantee that the result of pointer arithmetic is non-negiatve since payload_ptr is further
+  down than request_buffer. We can reason whilst the result is typed as a long int (8 bytes), the 
+  maximum possible message size is 4103. This is within the bounds of what a uint32_t can represent,
+  therefore there's no possible narrowing. This is safe!
+
+  Therefore the solution for this is a static_cast!
+  
+  */
+  message_len = static_cast<uint32_t>(payload_ptr - request_buffer);
   uint32_t payload_len = message_len - MSG_HEADER_SIZE;
   uint32_t net_payload_len = htonl(payload_len);
   if (payload_len > MSG_MAX_PAYLOAD_SIZE) {
@@ -318,8 +387,12 @@ int build_register_response(message_t &response, user_t &user) {
   uint8_t *moving_ptr = response.payload;
   write_tlv(moving_ptr, TAG_USER_ID, sizeof(user.user_id),
             static_cast<void *>(&user.user_id), 1);
-  write_tlv(moving_ptr, TAG_USERNAME, user.username.length(),
+
+  // NOTE: Again username.length() shuold have its upper 7 bytes already zeroed, so it's not narrowing.
+  write_tlv(moving_ptr, TAG_USERNAME, static_cast<uint8_t>(user.username.length()),
             user.username.data(), 0);
+
+
   response.payload_length = (uint32_t)(moving_ptr - response.payload);
   if (response.payload_length > MSG_MAX_PAYLOAD_SIZE) {
     LOG_ERROR("Payload of size %d bytes exceeds maximum of %d!\n",
@@ -402,13 +475,13 @@ int build_login_request(uint8_t *request_buffer,
   *header_ptr++ = 0;
 
   // Write payload into buffer
-  write_tlv(payload_ptr, TAG_USERNAME, credentials.username.length(),
+  write_tlv(payload_ptr, TAG_USERNAME, static_cast<uint8_t>(credentials.username.length()),
             credentials.username.data(), 0);
-  write_tlv(payload_ptr, TAG_PASSWORD, credentials.password.length(),
+  write_tlv(payload_ptr, TAG_PASSWORD, static_cast<uint8_t>(credentials.password.length()),
             credentials.password.data(), 0);
 
   // Calculate payload length and write it to header
-  message_len = payload_ptr - request_buffer;
+  message_len = static_cast<uint32_t>(payload_ptr - request_buffer);
   uint32_t payload_len = message_len - MSG_HEADER_SIZE;
   uint32_t net_payload_len = htonl(payload_len);
   if (payload_len > MSG_MAX_PAYLOAD_SIZE) {
@@ -483,7 +556,7 @@ int build_login_response(message_t &response, user_t &user) {
   uint8_t *moving_ptr = response.payload;
   write_tlv(moving_ptr, TAG_USER_ID, sizeof(user.user_id),
             static_cast<void *>(&user.user_id), 1);
-  write_tlv(moving_ptr, TAG_USERNAME, user.username.length(),
+  write_tlv(moving_ptr, TAG_USERNAME, static_cast<uint8_t>(user.username.length()),
             user.username.data(), 0);
   response.payload_length = (uint32_t)(moving_ptr - response.payload);
   if (response.payload_length > MSG_MAX_PAYLOAD_SIZE) {
@@ -562,14 +635,14 @@ int build_world_broadcast(uint8_t *request_buffer, world_broadcast_t &broadcast,
   // Write payload into buffer; calculate payload length
   write_tlv(payload_ptr, TAG_WORLD_BROADCAST, 0, NULL, 0);
   write_tlv(payload_ptr, TAG_SENDER_USERNAME,
-            broadcast.sender_username.length(),
+            static_cast<uint8_t>(broadcast.sender_username.length()),
             broadcast.sender_username.data(), 0);
   write_tlv(payload_ptr, TAG_MESSAGE_CONTENT,
-            broadcast.message_content.length(),
+            static_cast<uint8_t>(broadcast.message_content.length()),
             broadcast.message_content.data(), 0);
 
   // end of payload - start of message = total message size.
-  message_len = payload_ptr - request_buffer;
+  message_len = static_cast<uint32_t>(payload_ptr - request_buffer);
   uint32_t payload_len = message_len - MSG_HEADER_SIZE;
   uint32_t net_payload_len = htonl(payload_len);
   if (payload_len > MSG_MAX_PAYLOAD_SIZE) {
@@ -591,9 +664,10 @@ int build_world_broadcast(message_t &request, world_broadcast_t &broadcast) {
   // Write world broadcast's data into the message payload
   uint8_t *moving_ptr = request.payload;
   write_tlv(moving_ptr, TAG_WORLD_BROADCAST, 0, NULL, 0);
-  write_tlv(moving_ptr, TAG_SENDER_USERNAME, broadcast.sender_username.length(),
+
+  write_tlv(moving_ptr, TAG_SENDER_USERNAME, static_cast<uint8_t>(broadcast.sender_username.length()),
             broadcast.sender_username.data(), 0);
-  write_tlv(moving_ptr, TAG_MESSAGE_CONTENT, broadcast.message_content.length(),
+  write_tlv(moving_ptr, TAG_MESSAGE_CONTENT, static_cast<uint8_t>(broadcast.message_content.length()),
             broadcast.message_content.data(), 0);
 
   // Calculate payload and write header fields into message
@@ -647,10 +721,11 @@ int parse_world_broadcast(message_t &request, world_broadcast_t &broadcast) {
       has_sender = 1;
       break;
     case TAG_MESSAGE_CONTENT:
-      if (num_bytes > MAX_MSG_CONTENT_SIZE) {
-        LOG_ERROR("Malformed TLV: message content length exceeds limits!\n");
-        return RESP_ERROR_MALFORMED;
-      }
+
+      // If the client follows uses our code to build a world broadcast,
+      // then the content of the message won't exceed the maximum else. Otherwise
+      // the client could manually engineer a world broadcast would a content 
+      // size that exceeds the limit, but that broadcast wouldn't be parsed correctly
       broadcast.message_content.assign(
           reinterpret_cast<const char *>(payload_ptr), num_bytes);
       has_content = 1;
@@ -715,17 +790,17 @@ int build_p2p_broadcast(uint8_t *request_buffer, p2p_broadcast_t &broadcast,
   // Write payload data into the buffer
   write_tlv(payload_ptr, TAG_P2P_BROADCAST, 0, NULL, 0);
   write_tlv(payload_ptr, TAG_SENDER_USERNAME,
-            broadcast.sender_username.length(),
+            static_cast<uint8_t>(broadcast.sender_username.length()),
             broadcast.sender_username.data(), 0);
   write_tlv(payload_ptr, TAG_RECIPIENT_USERNAME,
-            broadcast.recipient_username.length(),
+            static_cast<uint8_t>(broadcast.recipient_username.length()),
             broadcast.recipient_username.data(), 0);
   write_tlv(payload_ptr, TAG_MESSAGE_CONTENT,
-            broadcast.message_content.length(),
+            static_cast<uint8_t>(broadcast.message_content.length()),
             broadcast.message_content.data(), 0);
 
   // Calculate payload and write header fields into message
-  message_len = payload_ptr - request_buffer;
+  message_len = static_cast<uint32_t>(payload_ptr - request_buffer);
   uint32_t payload_len = message_len - MSG_HEADER_SIZE;
   uint32_t net_payload_len = htonl(payload_len);
   if (payload_len > MSG_MAX_PAYLOAD_SIZE) {
@@ -751,12 +826,12 @@ int build_p2p_broadcast(message_t &request, p2p_broadcast_t &broadcast) {
     return -1;
   }
   write_tlv(moving_ptr, TAG_P2P_BROADCAST, 0, NULL, 0);
-  write_tlv(moving_ptr, TAG_SENDER_USERNAME, broadcast.sender_username.length(),
+  write_tlv(moving_ptr, TAG_SENDER_USERNAME, static_cast<uint8_t>(broadcast.sender_username.length()),
             broadcast.sender_username.data(), 0);
   write_tlv(moving_ptr, TAG_RECIPIENT_USERNAME,
-            broadcast.recipient_username.length(),
+            static_cast<uint8_t>(broadcast.recipient_username.length()),
             broadcast.recipient_username.data(), 0);
-  write_tlv(moving_ptr, TAG_MESSAGE_CONTENT, broadcast.message_content.length(),
+  write_tlv(moving_ptr, TAG_MESSAGE_CONTENT, static_cast<uint8_t>(broadcast.message_content.length()),
             broadcast.message_content.data(), 0);
 
   // Calculate payload and write header fields into message
@@ -820,10 +895,6 @@ int parse_p2p_broadcast(message_t &request, p2p_broadcast_t &broadcast) {
       has_recipient = 1;
       break;
     case TAG_MESSAGE_CONTENT:
-      if (num_bytes > MAX_MSG_CONTENT_SIZE) {
-        LOG_ERROR("Malformed TLV: message content length exceeds limits!\n");
-        return RESP_ERROR_MALFORMED;
-      }
       broadcast.message_content.assign(
           reinterpret_cast<const char *>(payload_ptr), num_bytes);
       has_content = 1;

@@ -4,7 +4,7 @@
 
 int main(void) {
   char input_ip[16]{"0.0.0.0"};
-  short port{8080};
+  short unsigned int port{8080};
   conn_t conn{};
   if (setup_client_signal_handlers(&conn) == -1) {
     return 1;

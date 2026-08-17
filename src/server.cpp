@@ -4,6 +4,7 @@
 #include "shared.hpp"
 #include <signal.h>
 #include <sys/epoll.h>
+#include <string.h> // strerror
 
 int listenfd = -1;
 
@@ -12,12 +13,13 @@ void sigint_handler(int sigint) {
   if (listenfd != -1) {
     close(listenfd);
   }
+  (void)sigint;
   close_db();
   exit(0);
 }
 
 int main(int argc, char **argv) {
-  int listenfd, epollfd;
+  
   struct epoll_event ev, events[MAX_EVENTS];
   signal(SIGINT, sigint_handler);
   signal(SIGTERM, sigint_handler);
@@ -37,7 +39,7 @@ int main(int argc, char **argv) {
     LOG_ERROR("init_server() error: Terminating program!\n");
     return -1;
   }
-  epollfd = epoll_create1(0);
+  int epollfd = epoll_create1(0);
   if (epollfd == -1) {
     LOG_ERROR("epoll_create1() error: %s!\n", strerror(errno));
     return -1;
@@ -93,13 +95,14 @@ int main(int argc, char **argv) {
       }
 
       // Step 3b: Process the fds for the TCP connection sockets
-      // NOTE: After reading, the connection may be in write state as well.
-      // Though, it hasn't been given the "ok" by the epoll to write, so it
-      // could block immediately, or we could have a lucky break to be able to
-      // write immediately. NOTE 2: current_flags needs to be a pointer or
-      // reference as handle_read_connection might update the flags and make it
+      // NOTE 1: After reading, the connection may have transitioned iinto the write state
+      // via application-layer logic rather than epoll telling the socket it's writable.
+      // It could immediately, or we could have a lucky break and write immediately (typical behavior)
+      // NOTE 2: current_flags needs to be a pointer or reference since
+      // handle_read_connection might update the flags and make it
       // writeable all within one iteration of the for loop.
-      ConnFlags &current_flags = conn_manager.flags[events[i].data.fd];
+      // NOTE 3: events[i].data.fd is guaranteed to be positive, so no sign flipping will happen
+      ConnFlags &current_flags = conn_manager.flags[static_cast<size_t>(events[i].data.fd)];
       int current_fd = events[i].data.fd;
       if (has_flag(current_flags, ConnFlags::WANT_READ)) {
         handle_read_connection(current_fd, epollfd);

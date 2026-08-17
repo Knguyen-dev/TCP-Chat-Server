@@ -1,28 +1,10 @@
 #ifndef SHARED_H
 #define SHARED_H
 
-#include <ctype.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <netdb.h>
-#include <pthread.h>
-#include <stdarg.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <unistd.h>
-
-// In C++
-#include <algorithm> // string lowercasing algo
-#include <cctype>
-#include <iostream>
-#include <limits>  // Required for std::numeric_limits
-#include <sstream> // string streams
 #include <string>
 #include <string_view>
 #include <vector>
+#include <cstdint> // for uint8_t and others
 
 #define MAX_USERNAME_SIZE 32
 #define MAX_PASSWORD_SIZE 32

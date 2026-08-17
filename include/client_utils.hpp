@@ -1,17 +1,7 @@
-#ifndef CLIENT_UTILS_H
-#define CLIENT_UTILS_H
+#ifndef CLIENT_UTILS_HPP
+#define CLIENT_UTILS_HPP
 
-#include "logger.hpp"
-#include "protocol.hpp"
 #include "shared.hpp"
-#include <arpa/inet.h>
-#include <atomic>
-#include <mutex>
-#include <poll.h>
-#include <signal.h>
-#include <thread>
-#include <unistd.h>
-#include <vector>
 
 /**
  * Sets up signal handlers for the client; for graceful shutdown.
@@ -37,6 +27,6 @@ void run_messaging_loop(conn_t &conn);
  * which will be populated with info from the callee.
  * @return Connection descriptor on success, otherwise -1.
  */
-int create_client_connection(char *ip, short port, conn_t &conn);
+int create_client_connection(char *ip, short unsigned port, conn_t &conn);
 
 #endif

@@ -1,4 +1,10 @@
 #include "shared.hpp"
+#include <cstdint>   // uint8_t
+#include <iostream>  // std::cout, std::cin, std::endl
+#include <cstring>   // strchr
+#include <limits>    // numeric_limits, streamsize
+#include <algorithm> // transform
+
 
 static uint8_t to_utype(ConnFlags f) { return static_cast<uint8_t>(f); }
 
