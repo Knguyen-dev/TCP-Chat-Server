@@ -1,6 +1,6 @@
 #include "shared.hpp"
 #include "logger.hpp"
-#include "../integration/test_utils.hpp"
+#include "test_utils.hpp"
 #include <sys/epoll.h>
 #include <fcntl.h>
 #include <string.h>

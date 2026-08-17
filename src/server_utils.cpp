@@ -1,38 +1,38 @@
 #include "server_utils.hpp"
-#include <errno.h>       // for errno, EAGAIN, EWOULDBLOCK, EINTR
-#include <fcntl.h>       // for fcntl, F_GETFL, F_SETFL, O_NONBLOCK
-#include <malloc.h>      // for mallinfo2
-#include <netdb.h>       // for addrinfo, freeaddrinfo, gai_strerror, getadd...
-#include <stdio.h>       // for snprintf, printf
-#include <stdlib.h>      // for exit
-#include <sys/epoll.h>   // for epoll_ctl, epoll_event, EPOLLET, EPOLLIN
-#include <sys/socket.h>  // for accept, bind, listen, setsockopt, sockaddr_s...
-#include <unistd.h>      // for close, read, ssize_t, sysconf, write, STDIN_...
-#include <cstring>       // for strerror, memset
-#include <fstream>       // for basic_istream, basic_ifstream, ifstream
-#include <string>        // for allocator, char_traits, operator==, basic_st...
-#include <vector>        // for vector
-#include "db.hpp"        // for get_user_by_username, init_db, insert_user
-#include "logger.hpp"    // for LOG_ERROR, LOG_DEBUG, LOG_INFO, LOG_WARN
-#include "protocol.hpp"  // for build_server_response, CHAT, RESP_ERROR_INTE...
-#include "shared.hpp"    // for ConnFlags, has_flag, operator|=, user_t, ope...
+#include "db.hpp"       // for get_user_by_username, init_db, insert_user
+#include "logger.hpp"   // for LOG_ERROR, LOG_DEBUG, LOG_INFO, LOG_WARN
+#include "protocol.hpp" // for build_server_response, CHAT, RESP_ERROR_INTE...
+#include "shared.hpp"   // for ConnFlags, has_flag, operator|=, user_t, ope...
+#include <cstring>      // for strerror, memset
+#include <errno.h>      // for errno, EAGAIN, EWOULDBLOCK, EINTR
+#include <fcntl.h>      // for fcntl, F_GETFL, F_SETFL, O_NONBLOCK
+#include <fstream>      // for basic_istream, basic_ifstream, ifstream
+#include <malloc.h>     // for mallinfo2
+#include <netdb.h>      // for addrinfo, freeaddrinfo, gai_strerror, getadd...
+#include <stdio.h>      // for snprintf, printf
+#include <stdlib.h>     // for exit
+#include <string>       // for allocator, char_traits, operator==, basic_st...
+#include <sys/epoll.h>  // for epoll_ctl, epoll_event, EPOLLET, EPOLLIN
+#include <sys/socket.h> // for accept, bind, listen, setsockopt, sockaddr_s...
+#include <unistd.h>     // for close, read, ssize_t, sysconf, write, STDIN_...
+#include <vector>       // for vector
 
 /**
  * Checks whether an error code means the socket would block
  * @param err Error code being tested
- * @note POSIX standard allows platforms (like older variants of unix) 
- * to define EAGAIN and EWOULDBLOCK as different. Checking 
+ * @note POSIX standard allows platforms (like older variants of unix)
+ * to define EAGAIN and EWOULDBLOCK as different. Checking
  * for both is the standard portable way of handling non-blockign sockets.
  * To silence GCC warnings, we'll compare their values at compile time.
  * If their values are different, we'll check for both values.
  * If their values are the same, we can default to the modern EAGAIN.
- * 
+ *
  */
 inline bool is_would_block(int err) {
 #if defined(EWOULDBLOCK) && (EWOULDBLOCK != EAGAIN)
-    return err == EAGAIN || err == EWOULDBLOCK;
+  return err == EAGAIN || err == EWOULDBLOCK;
 #else
-    return err == EAGAIN;
+  return err == EAGAIN;
 #endif
 }
 
@@ -109,26 +109,23 @@ static void log_server_metrics() {
 
   // 3. Get heap usage data.
   struct mallinfo2 mi = mallinfo2();
-  
 
   char buf[512];
   size_t offset = 0;
 
-  offset += static_cast<size_t>(snprintf(
-      buf + offset, sizeof(buf) - offset,
-      "Num connections = %d, num auth = %zu\n",
-      num_connected, static_cast<size_t>(num_auth)));
+  offset += static_cast<size_t>(
+      snprintf(buf + offset, sizeof(buf) - offset,
+               "Num connections = %d, num auth = %zu\n", num_connected,
+               static_cast<size_t>(num_auth)));
 
   offset += static_cast<size_t>(snprintf(
-      buf + offset, sizeof(buf) - offset,
-      "Physical RAM Usage (bytes) = %zu\n",
+      buf + offset, sizeof(buf) - offset, "Physical RAM Usage (bytes) = %zu\n",
       static_cast<size_t>(mem.physical_ram_bytes)));
 
   offset += static_cast<size_t>(snprintf(
       buf + offset, sizeof(buf) - offset,
       "Heap Used = %zu bytes, heap free = %zu bytes, total heap = %zu\n",
-      static_cast<size_t>(mi.uordblks),
-      static_cast<size_t>(mi.fordblks),
+      static_cast<size_t>(mi.uordblks), static_cast<size_t>(mi.fordblks),
       static_cast<size_t>(mi.arena)));
 
   LOG_INFO("%s\n", buf);
@@ -268,11 +265,11 @@ static void add_connection(int epollfd, int connfd) {
   }
 
   // 2. Reallocate dynamic vector if needed
-  // NOTE: Again, connfd+1 is guaranteed to be positive, so there's no issues converting 
-  // from signed to unsigned, as it stays positive.
+  // NOTE: Again, connfd+1 is guaranteed to be positive, so there's no issues
+  // converting from signed to unsigned, as it stays positive.
   if (conn_manager.get_size() <= (size_t)connfd) {
 
-    size_t new_size = static_cast<size_t>(connfd+1);
+    size_t new_size = static_cast<size_t>(connfd + 1);
     conn_manager.flags.resize(new_size);
     conn_manager.incoming_buffers.resize(new_size);
     conn_manager.outgoing_buffers.resize(new_size);
@@ -281,7 +278,8 @@ static void add_connection(int epollfd, int connfd) {
   }
 
   // 3. Record flags; connection slot is active and wants to read.
-  conn_manager.flags[static_cast<size_t>(connfd)] = ConnFlags::IS_ACTIVE | ConnFlags::WANT_READ;
+  conn_manager.flags[static_cast<size_t>(connfd)] =
+      ConnFlags::IS_ACTIVE | ConnFlags::WANT_READ;
 }
 
 void remove_connection(int connfd, int epollfd) {
@@ -427,7 +425,8 @@ static int handle_broadcast_message(int connfd, int epollfd, message_t &request,
 
   // If connection isn't authenticated, reject the request
   // NOTE: Only authenticated users are allowed to send broadcasts.
-  if (!has_flag(conn_manager.flags[static_cast<size_t>(connfd)], ConnFlags::IS_AUTH)) {
+  if (!has_flag(conn_manager.flags[static_cast<size_t>(connfd)],
+                ConnFlags::IS_AUTH)) {
     LOG_DEBUG("Unauthenticated user attempted to send a broadcast message!\n");
     response =
         build_server_response(CHAT, RESP_ERROR_INVALID_CREDENTIALS, NULL, 0);
@@ -461,7 +460,8 @@ static int handle_broadcast_message(int connfd, int epollfd, message_t &request,
     // than relying on user input. That's why I did this. You should modify the
     // protocol.cpp and corresponding client code so that we don't send over
     // sender_username in a message.
-    broadcast.sender_username = conn_manager.usernames[static_cast<size_t>(connfd)];
+    broadcast.sender_username =
+        conn_manager.usernames[static_cast<size_t>(connfd)];
 
     // Use broadcast to create a broadcast response
     // NOTE: Broadcast response sent to all other clients will also be the
@@ -493,13 +493,13 @@ static int handle_broadcast_message(int connfd, int epollfd, message_t &request,
       // b. Copy serialized message into recipient's outgoing buffer
       // c. Set the recipient to writing state so the event loop writes the data
       // we stored in their outgoing buffer.
-        conn_manager.outgoing_buffers[i].insert(
+      conn_manager.outgoing_buffers[i].insert(
           conn_manager.outgoing_buffers[i].end(), serialized_response.begin(),
           serialized_response.end());
 
-
-      // NOTE: i is always positive, but it's never big enough where the leading 1 causes 
-      // i to be interpreted as negative with two's complement. Therefore it's a safe cast.
+      // NOTE: i is always positive, but it's never big enough where the leading
+      // 1 causes i to be interpreted as negative with two's complement.
+      // Therefore it's a safe cast.
       set_connection_state(epollfd, static_cast<int>(i), ConnState::WRITING);
     }
     break;
@@ -520,7 +520,8 @@ static int handle_broadcast_message(int connfd, int epollfd, message_t &request,
       return RESP_ERROR_MALFORMED;
     }
 
-    broadcast.sender_username = conn_manager.usernames[static_cast<size_t>(connfd)];
+    broadcast.sender_username =
+        conn_manager.usernames[static_cast<size_t>(connfd)];
     if (broadcast.sender_username == broadcast.recipient_username) {
       LOG_DEBUG("Received p2p broadcast with recipient username the same as "
                 "the sender username!\n");
@@ -553,8 +554,9 @@ static int handle_broadcast_message(int connfd, int epollfd, message_t &request,
       }
       // b. If connection's username matches the recipient username, record and
       // break out of loop
-      // NOTE: i is always positive, but not big enough to be represented as negative 
-      // when interpreting as signed. Therefore this is a safe cast to signed integer.
+      // NOTE: i is always positive, but not big enough to be represented as
+      // negative when interpreting as signed. Therefore this is a safe cast to
+      // signed integer.
       if (conn_manager.usernames[i] == recipient_username) {
         recipient_conn_fd = static_cast<int>(i);
         break;
@@ -570,13 +572,15 @@ static int handle_broadcast_message(int connfd, int epollfd, message_t &request,
     // b. Set recipient to writing state so the event loop knows to send to the
     // recipient.
     // TODO: Seems like an unnecessary copy.
-    // NOTE: Aagin, recipient_conn_fd is a file descriptor, it's always positive, therefore 
-    // interpreting to unsigned isn't an issue.
+    // NOTE: Aagin, recipient_conn_fd is a file descriptor, it's always
+    // positive, therefore interpreting to unsigned isn't an issue.
     std::vector<uint8_t> serialized_response;
     write_message_to_buffer(serialized_response, response);
-    conn_manager.outgoing_buffers[static_cast<size_t>(recipient_conn_fd)].insert(
-      conn_manager.outgoing_buffers[static_cast<size_t>(recipient_conn_fd)].end(),
-      serialized_response.begin(), serialized_response.end());
+    conn_manager.outgoing_buffers[static_cast<size_t>(recipient_conn_fd)]
+        .insert(conn_manager
+                    .outgoing_buffers[static_cast<size_t>(recipient_conn_fd)]
+                    .end(),
+                serialized_response.begin(), serialized_response.end());
     set_connection_state(epollfd, recipient_conn_fd, ConnState::WRITING);
     break;
   }
@@ -603,7 +607,8 @@ static int handle_broadcast_message(int connfd, int epollfd, message_t &request,
 static bool try_one_request(int connfd, int epollfd) {
 
   // Don't proceed if we don't have message header + 1 byte of payload yet.
-  std::vector<uint8_t> &incoming_buffer = conn_manager.incoming_buffers[static_cast<size_t>(connfd)];
+  std::vector<uint8_t> &incoming_buffer =
+      conn_manager.incoming_buffers[static_cast<size_t>(connfd)];
   if (incoming_buffer.size() < MSG_HEADER_SIZE + 1) {
     return false;
   }
@@ -648,7 +653,8 @@ static bool try_one_request(int connfd, int epollfd) {
   // a. Successfully processed message, erase message data from incoming buffer.
   // b. Write server response to client's outgoing buffer.
   buf_consume(incoming_buffer, MSG_HEADER_SIZE + request.payload_length);
-  write_message_to_buffer(conn_manager.outgoing_buffers[static_cast<size_t>(connfd)], response);
+  write_message_to_buffer(
+      conn_manager.outgoing_buffers[static_cast<size_t>(connfd)], response);
   return true;
 }
 
@@ -668,8 +674,10 @@ void handle_read_connection(int connfd, int epollfd) {
       set_connection_state(epollfd, connfd, ConnState::CLOSING);
       return;
     } else if (rv == 0) {
-      if (conn_manager.incoming_buffers[static_cast<size_t>(connfd)].size() == 0) {
-        if (has_flag(conn_manager.flags[static_cast<size_t>(connfd)], ConnFlags::IS_AUTH)) {
+      if (conn_manager.incoming_buffers[static_cast<size_t>(connfd)].size() ==
+          0) {
+        if (has_flag(conn_manager.flags[static_cast<size_t>(connfd)],
+                     ConnFlags::IS_AUTH)) {
           LOG_DEBUG("Remote Peer (fd=%d, username=%s) disconnected!\n", connfd,
                     conn_manager.usernames[static_cast<size_t>(connfd)].data());
         } else {
@@ -682,9 +690,11 @@ void handle_read_connection(int connfd, int epollfd) {
       return;
     }
 
-    // NOTE: rv cast is justified because ATP, rv must be a positive value. Therefore 
-    // casting from long int to unsigned long int won't change the sign of the result.
-    buf_append(conn_manager.incoming_buffers[static_cast<size_t>(connfd)], buffer, static_cast<size_t>(rv));
+    // NOTE: rv cast is justified because ATP, rv must be a positive value.
+    // Therefore casting from long int to unsigned long int won't change the
+    // sign of the result.
+    buf_append(conn_manager.incoming_buffers[static_cast<size_t>(connfd)],
+               buffer, static_cast<size_t>(rv));
   }
 
   // ### ASIDE: Core State Machine Logic ###
@@ -700,7 +710,8 @@ void handle_read_connection(int connfd, int epollfd) {
   // If we have outgoing messages to send (due to successfully parsing a request
   // message), then update the state machine to indicate that we want to write
   // to the socket.
-  std::vector<uint8_t> &outgoing_buffer = conn_manager.outgoing_buffers[static_cast<size_t>(connfd)];
+  std::vector<uint8_t> &outgoing_buffer =
+      conn_manager.outgoing_buffers[static_cast<size_t>(connfd)];
   if (outgoing_buffer.size() > 0) {
     set_connection_state(epollfd, connfd, ConnState::WRITING);
   }
@@ -708,7 +719,8 @@ void handle_read_connection(int connfd, int epollfd) {
 
 void handle_write_connection(int connfd, int epollfd) {
 
-  std::vector<uint8_t> &outgoing_buffer = conn_manager.outgoing_buffers[static_cast<size_t>(connfd)];
+  std::vector<uint8_t> &outgoing_buffer =
+      conn_manager.outgoing_buffers[static_cast<size_t>(connfd)];
   while (true) {
     ssize_t rv = write(connfd, outgoing_buffer.data(), outgoing_buffer.size());
     if (rv < 0) {

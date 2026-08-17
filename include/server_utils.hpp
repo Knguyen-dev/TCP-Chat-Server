@@ -1,10 +1,10 @@
 #ifndef SERVER_UTILS_H
 #define SERVER_UTILS_H
 
-#include <stddef.h>  // for size_t
-#include <stdint.h>  // for uint8_t, uint32_t
-#include <string>    // for string
-#include <vector>    // for vector
+#include <stddef.h>             // for size_t
+#include <stdint.h>             // for uint8_t, uint32_t
+#include <string>               // for string
+#include <vector>               // for vector
 enum class ConnFlags : uint8_t; // forward declaration defined in shared.hpp
 
 #define LISTENQ 100

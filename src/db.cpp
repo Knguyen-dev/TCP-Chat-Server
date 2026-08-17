@@ -1,10 +1,10 @@
 #include "db.hpp"
-#include <errno.h>     // for errno
-#include <sqlite3.h>   // for sqlite3_bind_text, sqlite3_finalize, SQLITE_OK
-#include <stdio.h>     // for fprintf, remove, stderr
-#include <cstdint>     // for uint32_t
-#include <cstring>     // for strerror, NULL
-#include "shared.hpp"  // for user_t
+#include "shared.hpp" // for user_t
+#include <cstdint>    // for uint32_t
+#include <cstring>    // for strerror, NULL
+#include <errno.h>    // for errno
+#include <sqlite3.h>  // for sqlite3_bind_text, sqlite3_finalize, SQLITE_OK
+#include <stdio.h>    // for fprintf, remove, stderr
 
 sqlite3 *db;
 
@@ -77,7 +77,8 @@ int get_user_by_username(const std::string &username, user_t &user) {
   int found = 0;
   if (sqlite3_step(res) == SQLITE_ROW) {
 
-    // user_id will always be strictly positive, so converting int to uint32_t is not dangerous.
+    // user_id will always be strictly positive, so converting int to uint32_t
+    // is not dangerous.
     user.user_id = static_cast<uint32_t>(sqlite3_column_int(res, 0));
     const char *sql_username = (const char *)sqlite3_column_text(res, 1);
     const char *sql_password = (const char *)sqlite3_column_text(res, 2);

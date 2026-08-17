@@ -1,10 +1,10 @@
 #ifndef SHARED_H
 #define SHARED_H
 
+#include <cstdint> // for uint8_t and others
 #include <string>
 #include <string_view>
 #include <vector>
-#include <cstdint> // for uint8_t and others
 
 #define MAX_USERNAME_SIZE 32
 #define MAX_PASSWORD_SIZE 32
