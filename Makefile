@@ -9,7 +9,7 @@ ENABLE_LOGGING ?= 1
 
 install:
 	sudo apt update
-	sudo apt install iwyu && ninja-build
+	sudo apt install build-essential && clang-format && iwyu && ninja-build && libsqlite3-dev
 
 # NOTE: --jobs allows CMake to use multiple cores for builds
 # to parallelize and speed them up. 
@@ -26,6 +26,9 @@ debug:
 asan:
 	cmake -S . -B $(ASAN_DIR) -G Ninja -DCMAKE_BUILD_TYPE=Debug -DENABLE_ASAN=ON
 	cmake --build $(ASAN_DIR)
+
+benchmark: build
+	sudo perf stat ./$(BUILD_DIR)/TCPChatServer_benchmark
 
 run-server: build
 	./$(BUILD_DIR)/TCPChatServer_server $(PORT) $(IS_TEST) $(ENABLE_LOGGING)

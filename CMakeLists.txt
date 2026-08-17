@@ -165,13 +165,14 @@ configure_project_target(${PROJECT_NAME}_server)
 # -----------------------------
 # Benchmarks and Tests
 # -----------------------------
+
+# Create google benchmark target
+# NOTE: No need to include the 'include' directories
+# Since the benchmark file only uses system headers.
 add_executable(
     ${PROJECT_NAME}_benchmark
     test/benchmark/benchmark_test.cpp
 )
-
-# NOTE: No need to include the 'include' directories
-# Since the benchmark file only uses system headers.
 target_link_libraries(
     ${PROJECT_NAME}_benchmark
     PRIVATE
