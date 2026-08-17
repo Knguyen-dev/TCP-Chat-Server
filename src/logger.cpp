@@ -1,7 +1,7 @@
 #include "logger.hpp"
-#include <cstring>  // for strchr
-#include <cstdarg>  // for va_end, va_list, va_start
-#include <cstdio>   // for fprintf, stderr, vsnprintf
+#include <cstdarg> // for va_end, va_list, va_start
+#include <cstdio>  // for fprintf, stderr, vsnprintf
+#include <cstring> // for strchr
 
 static bool should_log{true};
 

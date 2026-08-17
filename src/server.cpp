@@ -1,15 +1,15 @@
-#include <errno.h>           // for errno
-#include <signal.h>          // for signal, SIGINT, SIGTERM, size_t
-#include <stdio.h>           // for printf
-#include <stdlib.h>          // for atoi, exit
-#include <string.h>          // for strerror
-#include <sys/epoll.h>       // for epoll_event, epoll_ctl, EPOLLERR, EPOLL_...
-#include <unistd.h>          // for STDIN_FILENO, close
-#include <vector>            // for vector
-#include "db.hpp"            // for close_db
-#include "logger.hpp"        // for LOG_ERROR, init_logger, LOG_WARN
-#include "server_utils.hpp"  // for MAX_EVENTS, accept_all_connections, hand...
-#include "shared.hpp"        // for has_flag, ConnFlags
+#include "db.hpp"           // for close_db
+#include "logger.hpp"       // for LOG_ERROR, init_logger, LOG_WARN
+#include "server_utils.hpp" // for MAX_EVENTS, accept_all_connections, hand...
+#include "shared.hpp"       // for has_flag, ConnFlags
+#include <errno.h>          // for errno
+#include <signal.h>         // for signal, SIGINT, SIGTERM, size_t
+#include <stdio.h>          // for printf
+#include <stdlib.h>         // for atoi, exit
+#include <string.h>         // for strerror
+#include <sys/epoll.h>      // for epoll_event, epoll_ctl, EPOLLERR, EPOLL_...
+#include <unistd.h>         // for STDIN_FILENO, close
+#include <vector>           // for vector
 
 int listenfd = -1;
 
@@ -24,7 +24,7 @@ void sigint_handler(int sigint) {
 }
 
 int main(int argc, char **argv) {
-  
+
   struct epoll_event ev, events[MAX_EVENTS];
   signal(SIGINT, sigint_handler);
   signal(SIGTERM, sigint_handler);
@@ -100,14 +100,16 @@ int main(int argc, char **argv) {
       }
 
       // Step 3b: Process the fds for the TCP connection sockets
-      // NOTE 1: After reading, the connection may have transitioned iinto the write state
-      // via application-layer logic rather than epoll telling the socket it's writable.
-      // It could immediately, or we could have a lucky break and write immediately (typical behavior)
-      // NOTE 2: current_flags needs to be a pointer or reference since
-      // handle_read_connection might update the flags and make it
-      // writeable all within one iteration of the for loop.
-      // NOTE 3: events[i].data.fd is guaranteed to be positive, so no sign flipping will happen
-      ConnFlags &current_flags = conn_manager.flags[static_cast<size_t>(events[i].data.fd)];
+      // NOTE 1: After reading, the connection may have transitioned iinto the
+      // write state via application-layer logic rather than epoll telling the
+      // socket it's writable. It could immediately, or we could have a lucky
+      // break and write immediately (typical behavior) NOTE 2: current_flags
+      // needs to be a pointer or reference since handle_read_connection might
+      // update the flags and make it writeable all within one iteration of the
+      // for loop. NOTE 3: events[i].data.fd is guaranteed to be positive, so no
+      // sign flipping will happen
+      ConnFlags &current_flags =
+          conn_manager.flags[static_cast<size_t>(events[i].data.fd)];
       int current_fd = events[i].data.fd;
       if (has_flag(current_flags, ConnFlags::WANT_READ)) {
         handle_read_connection(current_fd, epollfd);

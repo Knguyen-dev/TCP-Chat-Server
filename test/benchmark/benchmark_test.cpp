@@ -32,8 +32,8 @@ static std::vector<conn_ptr_t*> make_indirect_table(size_t N) {
     for (size_t i = 0; i < N; i++) {
         auto* conn = new conn_ptr_t();
         conn->user = new user_t();
-        conn->user->id = i;
-        conn->fd = i;
+        conn->user->id = static_cast<uint32_t>(i);
+        conn->fd = static_cast<int>(i);
         conn->authenticated = true;
         table.push_back(conn);
     }
@@ -48,8 +48,8 @@ static std::vector<conn_ptr_t> make_direct_non_embedded_table(size_t N) {
     table.reserve(N);
     for (size_t i = 0; i < N; i++) {
         table[i].user = new user_t();
-        table[i].user->id = i;
-        table[i].fd = i;
+        table[i].user->id = static_cast<uint32_t>(i);
+        table[i].fd = static_cast<int>(i);
         table[i].authenticated = true;
     }
     return table;
@@ -67,10 +67,9 @@ static std::vector<conn_embedded_t> make_direct_table(size_t N) {
 
     for (size_t i = 0; i < N; i++) {
         conn_embedded_t conn{};
-        conn.user.id = i;
-        conn.fd = i;
+        conn.user.id = static_cast<uint32_t>(i);
+        conn.fd = static_cast<int>(i);
         conn.authenticated = true;
-
         table.push_back(conn);
     }
 
@@ -92,7 +91,7 @@ static void BM_Traversal_Indirect(benchmark::State& state) {
     size_t N = state.range(0);
     auto table = make_indirect_table(N);
     for (auto _ : state) {
-        uint64_t sum = 0;
+        int sum = 0;
         for (size_t i = 0; i < N; i++) {
             sum += table[i]->fd;
         }
@@ -108,7 +107,7 @@ static void BM_Traversal_Direct(benchmark::State& state) {
     size_t N = state.range(0);
     auto table = make_direct_table(N);
     for (auto _ : state) {
-        uint64_t sum = 0;
+        int sum = 0;
         for (size_t i = 0; i < N; i++) {
             sum += table[i].fd;
         }
@@ -221,7 +220,7 @@ typedef struct {
 /**
  * Creates a table of active and authenticated connections of size n
  */
-static std::vector<conn_t> create_connection_table(int64_t n) {
+static std::vector<conn_t> create_connection_table(size_t n) {
     std::vector<conn_t> conn_table;
     conn_table.resize(n);
      for (size_t i = 0; i < n; i++) {

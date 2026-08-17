@@ -1,8 +1,8 @@
 #ifndef DB_HPP
 #define DB_HPP
 
-#include <string>  // for string
-struct user_t; // forward declaration, definition is in shared.hpp
+#include <string> // for string
+struct user_t;    // forward declaration, definition is in shared.hpp
 
 // NOTE: Forward declarations for our constant globals
 extern const char *const DB_PATH;
