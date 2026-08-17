@@ -30,7 +30,7 @@ if (IWYU_PATH)
     # NOTE: Don't want to set IWYU globally because it will analyze google benchmark
     # files as well, causing unnecessary build time and clutter. Instead we'll
     # have IWYU be applied on specific build targets (our own code).
-    # set(IWYU_COMMAND "${IWYU_PATH}" "-Xiwyu" "--error")
+    set(IWYU_COMMAND "${IWYU_PATH}" "-Xiwyu" "--error")
 else()
     message(WARNING "include-what-you-use not found on system PATH. IWYU analysis disabled.")
 endif()

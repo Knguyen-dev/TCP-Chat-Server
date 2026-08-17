@@ -1,11 +1,11 @@
 #ifndef PROTOCOL_HPP
 #define PROTOCOL_HPP
 
-#include <cstdint>
-#include <string>
-#include <vector>
-#include <cstddef>
-#include "shared.hpp" // for user_t
+#include <cstddef>  // for size_t
+#include <cstdint>  // for uint8_t, uint32_t
+#include <string>   // for string
+#include <vector>   // for vector
+struct user_t;      // forward declaration, protocol.cpp does "#includes shared.hpp"
 
 
 #define MSG_HEADER_SIZE 7         // max header size in bytes

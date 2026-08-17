@@ -1,11 +1,12 @@
 #include "protocol.hpp"
-#include "shared.hpp"
-#include "logger.hpp"
-#include <cstdint>      // uint8_t, uint32_t, and others
-#include <netinet/in.h> // htons
-#include <cstring>      // memcpy
-#include <unistd.h>     // read, write, close
-#include <sstream>      // std::stringstream
+#include <arpa/inet.h>  // for htonl, ntohl, htons
+#include <errno.h>      // for errno, EINTR
+#include <unistd.h>     // for read, ssize_t, write
+#include <cstdint>      // for uint8_t, uint32_t, uint16_t
+#include <cstring>      // for memcpy, strerror
+#include <sstream>      // for basic_ostream, operator<<, basic_stringstream
+#include "logger.hpp"   // for LOG_ERROR, LOG_WARN
+#include "shared.hpp"   // for MAX_USERNAME_SIZE, user_t, MAX_PASSWORD_SIZE
 
 // ---------------------------------
 // Utilities

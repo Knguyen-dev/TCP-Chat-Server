@@ -1,5 +1,7 @@
 #include "logger.hpp"
-#include <cstring>
+#include <cstring>  // for strchr
+#include <cstdarg>  // for va_end, va_list, va_start
+#include <cstdio>   // for fprintf, stderr, vsnprintf
 
 static bool should_log{true};
 

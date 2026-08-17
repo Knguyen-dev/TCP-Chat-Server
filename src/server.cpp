@@ -1,10 +1,15 @@
-#include "db.hpp"
-#include "logger.hpp"
-#include "server_utils.hpp"
-#include "shared.hpp"
-#include <signal.h>
-#include <sys/epoll.h>
-#include <string.h> // strerror
+#include <errno.h>           // for errno
+#include <signal.h>          // for signal, SIGINT, SIGTERM, size_t
+#include <stdio.h>           // for printf
+#include <stdlib.h>          // for atoi, exit
+#include <string.h>          // for strerror
+#include <sys/epoll.h>       // for epoll_event, epoll_ctl, EPOLLERR, EPOLL_...
+#include <unistd.h>          // for STDIN_FILENO, close
+#include <vector>            // for vector
+#include "db.hpp"            // for close_db
+#include "logger.hpp"        // for LOG_ERROR, init_logger, LOG_WARN
+#include "server_utils.hpp"  // for MAX_EVENTS, accept_all_connections, hand...
+#include "shared.hpp"        // for has_flag, ConnFlags
 
 int listenfd = -1;
 

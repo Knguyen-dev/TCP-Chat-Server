@@ -1,19 +1,21 @@
-#include <cstdint>
-#include <vector>
-#include <string>
-#include <sys/epoll.h> // epoll() 
-#include <fstream>
-#include <malloc.h>    // mallinfo2()
-#include <unistd.h>    // close(), read(), write()
-#include <fcntl.h>     // fcntl() for setting non-blocking sockets
-#include <netdb.h>     // freeaddrinfo
-#include <cstring>     // memset
-
 #include "server_utils.hpp"
-#include "db.hpp"
-#include "logger.hpp"
-#include "protocol.hpp"
-#include "shared.hpp"
+#include <errno.h>       // for errno, EAGAIN, EWOULDBLOCK, EINTR
+#include <fcntl.h>       // for fcntl, F_GETFL, F_SETFL, O_NONBLOCK
+#include <malloc.h>      // for mallinfo2
+#include <netdb.h>       // for addrinfo, freeaddrinfo, gai_strerror, getadd...
+#include <stdio.h>       // for snprintf, printf
+#include <stdlib.h>      // for exit
+#include <sys/epoll.h>   // for epoll_ctl, epoll_event, EPOLLET, EPOLLIN
+#include <sys/socket.h>  // for accept, bind, listen, setsockopt, sockaddr_s...
+#include <unistd.h>      // for close, read, ssize_t, sysconf, write, STDIN_...
+#include <cstring>       // for strerror, memset
+#include <fstream>       // for basic_istream, basic_ifstream, ifstream
+#include <string>        // for allocator, char_traits, operator==, basic_st...
+#include <vector>        // for vector
+#include "db.hpp"        // for get_user_by_username, init_db, insert_user
+#include "logger.hpp"    // for LOG_ERROR, LOG_DEBUG, LOG_INFO, LOG_WARN
+#include "protocol.hpp"  // for build_server_response, CHAT, RESP_ERROR_INTE...
+#include "shared.hpp"    // for ConnFlags, has_flag, operator|=, user_t, ope...
 
 /**
  * Checks whether an error code means the socket would block
@@ -33,8 +35,6 @@ inline bool is_would_block(int err) {
     return err == EAGAIN;
 #endif
 }
-
-
 
 // ----------------
 // Connection Table

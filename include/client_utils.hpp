@@ -1,7 +1,8 @@
 #ifndef CLIENT_UTILS_HPP
 #define CLIENT_UTILS_HPP
 
-#include "shared.hpp"
+// forward declaration; client_utils.cpp should do #include "shared.hpp"
+struct conn_t;
 
 /**
  * Sets up signal handlers for the client; for graceful shutdown.

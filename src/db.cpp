@@ -1,7 +1,10 @@
 #include "db.hpp"
-#include "shared.hpp"
-#include <cstring>
-#include <cstdint>
+#include <errno.h>     // for errno
+#include <sqlite3.h>   // for sqlite3_bind_text, sqlite3_finalize, SQLITE_OK
+#include <stdio.h>     // for fprintf, remove, stderr
+#include <cstdint>     // for uint32_t
+#include <cstring>     // for strerror, NULL
+#include "shared.hpp"  // for user_t
 
 sqlite3 *db;
 

@@ -1,9 +1,6 @@
 #ifndef LOGGER_HPP
 #define LOGGER_HPP
 
-#include <cstdarg>
-#include <cstdio>
-
 // Enum representing the log level severity
 enum LogLevel {
   LOG_DEBUG = 0,
