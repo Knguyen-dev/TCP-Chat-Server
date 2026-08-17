@@ -1,4 +1,21 @@
+
+#include <arpa/inet.h> // inet_pton()
+#include <atomic>   // std::atomic
+#include <mutex>    // std::mutex
+#include <poll.h>   // poll()
+#include <signal.h> // signal handling
+#include <thread>   // multithreading
+#include <unistd.h> // close(), read(), write()
+#include <vector>   // std::vector
+#include <cstring>  // memset
+#include <sstream>  // std::stringstream
+#include <iostream> // std::cout, cin, endl, getline
+
+
 #include "client_utils.hpp"
+#include "protocol.hpp"
+#include "logger.hpp"
+
 
 // -----------------------------
 // Signal Handling and Graceful Shutdown
@@ -33,6 +50,7 @@ static void handle_client_sigint(int sig) {
   const char msg[] = "\n[SIGINT] Shutting down...\n";
   ssize_t unused = write(STDERR_FILENO, msg, sizeof(msg) - 1);
   (void)unused;
+  (void)sig;
   g_keep_running.store(false);
 }
 
@@ -218,13 +236,11 @@ static void handle_registration_response(message_t &response) {
 
 /**
  * Handles the server's response to a client's user login request.
- * @param conn Connection representing the client's TCP connection with the
- * server.
  * @param response A response message whose message_t::type is assumed to be
  * 'LOGIN'. It contains inof about the server's response to the client's login
  * request.
  */
-static void handle_login_response(conn_t &conn, message_t &response) {
+static void handle_login_response(message_t &response) {
   if (response.rc != 0) {
     LOG_WARN(
         "[LOGIN]: User Login Failed: %s\n",
@@ -249,12 +265,10 @@ static void handle_login_response(conn_t &conn, message_t &response) {
 /**
  * Handles processing the server's response message to the client broadcast
  * request message.
- * @param conn Connection representing the client's TCP connection with the
- * server.
  * @param response A response message whose message_t::type is CHAT. It contains
  * info about the server's response to the client's broadcast request.
  */
-static void handle_broadcast_response(conn_t &conn, message_t &response) {
+static void handle_broadcast_response(message_t &response) {
   if (response.rc != 0) {
     LOG_WARN(
         "[CHAT] Message failed to send: %s\n",
@@ -306,10 +320,10 @@ static bool handle_server_response(conn_t &conn) {
     handle_registration_response(response);
     break;
   case LOGIN:
-    handle_login_response(conn, response);
+    handle_login_response(response);
     break;
   case CHAT:
-    handle_broadcast_response(conn, response);
+    handle_broadcast_response(response);
     break;
   default:
     LOG_WARN("Server response type unknown: '%d'\n", response.type);
@@ -503,7 +517,7 @@ void run_messaging_loop(conn_t &conn) {
 // Network Connection and Setup
 // -------------------------------
 
-int create_client_connection(char *ip, short port, conn_t &conn) {
+int create_client_connection(char *ip, short unsigned port, conn_t &conn) {
   int fd = socket(AF_INET, SOCK_STREAM, 0);
   if (fd < 0) {
     LOG_ERROR("socket() error: %s!\n", strerror(errno));

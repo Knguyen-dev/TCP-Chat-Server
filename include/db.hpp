@@ -2,6 +2,7 @@
 #define DB_H
 
 #include "shared.hpp"
+#include <string>
 
 // C-library
 extern "C" {

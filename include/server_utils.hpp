@@ -1,13 +1,9 @@
 #ifndef SERVER_UTILS_H
 #define SERVER_UTILS_H
+
 #include "shared.hpp"
-
-#include <sys/epoll.h> // for epoll readiness API
-
-#include <fstream>
-#include <malloc.h>
+#include <vector>
 #include <string>
-#include <unistd.h>
 
 #define LISTENQ 100
 #define MAX_EVENTS 64
@@ -31,7 +27,7 @@ struct ConnectionManager {
   size_t get_size() const noexcept { return flags.size(); }
 };
 
-constexpr int INITIAL_CAPACITY{10000};
+constexpr size_t INITIAL_CAPACITY{10000};
 
 extern ConnectionManager conn_manager;
 

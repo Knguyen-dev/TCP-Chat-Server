@@ -1,7 +1,12 @@
 #ifndef PROTOCOL_HPP
 #define PROTOCOL_HPP
 
-#include "shared.hpp"
+#include <cstdint>
+#include <string>
+#include <vector>
+#include <cstddef>
+#include "shared.hpp" // for user_t
+
 
 #define MSG_HEADER_SIZE 7         // max header size in bytes
 #define MSG_MAX_PAYLOAD_SIZE 4096 // max payload size in bytes
